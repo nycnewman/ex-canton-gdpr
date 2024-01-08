@@ -1,0 +1,126 @@
+module IdentityManagement where
+
+import Daml.Script
+
+data PublicKey = PublicKey with
+    publicKey : Text
+    fingerprint : Text
+      deriving (Eq,Show)
+
+template IdentityController with
+    owner : Party
+    publicKey : PublicKey
+    following : [Party]
+  where
+    signatory owner
+    observer following
+
+    ensure (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+
+    choice InviteNewIdentity : ContractId InviteIdentity with
+      invitee : Party
+
+        controller owner
+
+        do
+          create this with 
+            following = invitee :: following
+          create InviteIdentity with 
+            owner
+            invitee
+
+    choice RemoveIdentity : ContractId IdentityController with
+        follower : Party
+
+      controller owner
+
+      do
+        currentRecord <- fetchByKey @RegisteredIdentity (owner, follower)
+        archive currentRecord._1
+        create this with
+          following = following
+    
+    nonconsuming choice GetPublicKey : PublicKey
+      controller owner, following
+      do
+        return publicKey
+
+template InviteIdentity 
+  with
+    owner : Party
+    invitee : Party
+
+  where
+    signatory owner
+    observer invitee
+
+    key (owner, invitee) : (Party, Party)
+    maintainer key._1
+
+    choice AcceptInvite : ContractId RegisteredIdentity with
+        publicKey : PublicKey
+        
+      controller invitee
+      do
+        assertMsg "Invalid Public Key" (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+        
+        create RegisteredIdentity with 
+          owner
+          identity = invitee
+          publicKey
+        
+
+    choice RejectInvite : () with
+        
+      controller invitee
+      do
+        return ()
+
+template RegisteredIdentity with
+    owner : Party
+    identity : Party
+    publicKey : PublicKey
+  where
+    signatory owner
+    observer identity
+
+    key (owner, identity) : (Party, Party)
+    maintainer key._1
+
+    ensure (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+
+data TestParties = TestParties with
+  owner : Party
+  identity1 : Party
+  identity2 : Party
+  identity3 : Party
+
+setupParties: Script TestParties
+setupParties = script do
+  owner <- allocatePartyWithHint "Data_Owner" (PartyIdHint "Data_Owner")
+  identity1 <- allocatePartyWithHint "DataProcessor_1" (PartyIdHint "Data Processor_1")
+  identity2 <- allocatePartyWithHint "DataProcessor_2" (PartyIdHint "Data Processor_2")
+  identity3 <- allocatePartyWithHint "DataProcessor_3" (PartyIdHint "Data Processor_3")
+
+  ownerId <- validateUserId "Data_Owner"
+  identity1Id <- validateUserId "DataProcessor_1"
+  identity2Id <- validateUserId "DataProcessor_2"
+  identity3Id <- validateUserId "DataProcessor_3"
+
+  createUser (User ownerId (Some owner)) [CanActAs owner]
+  createUser (User identity1Id (Some identity1)) [CanActAs identity1]
+  createUser (User identity2Id (Some identity2)) [CanActAs identity2]
+  createUser (User identity3Id (Some identity3)) [CanActAs identity3]
+
+  return $ TestParties with
+    owner = owner
+    identity1 = identity1
+    identity2 = identity2
+    identity3 = identity3
+
+setup: Script ()
+setup = script do 
+  testParties@TestParties{..} <- setupParties
+
+  return ()
+

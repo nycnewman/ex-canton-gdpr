@@ -1,0 +1,131 @@
+module Test where
+
+import Daml.Script
+import DA.List
+import DA.Optional
+
+import IdentityManagement
+
+testHappyPath : Script ()
+testHappyPath = script do
+  testParties@TestParties{..} <- setupParties
+
+  let 
+    ownerKey = PublicKey with
+      publicKey = "OWNER KEY"
+      fingerprint = "OWNER FINGERPRINT"
+  ownerId <- submit owner do
+    createCmd IdentityController with
+      owner
+      publicKey = ownerKey
+      following = []
+
+  submit owner do
+    exerciseCmd @IdentityController ownerId InviteNewIdentity with
+      invitee = identity1
+
+  ownerId <- query @IdentityController owner 
+  let 
+    newOwnerCid = (head ownerId)._1
+  submit owner do
+    exerciseCmd @IdentityController newOwnerCid InviteNewIdentity with
+      invitee = identity2
+
+  ownerId <- query @IdentityController owner 
+  let 
+    newOwnerCid = (head ownerId)._1
+  submit owner do
+    exerciseCmd @IdentityController newOwnerCid InviteNewIdentity with
+      invitee = identity3
+
+  -- identity1 accepts invite and provides public key
+  let
+    identity1Key = PublicKey with
+      publicKey = "IDENTITY1 KEY"
+      fingerprint = "IDENTITY1 FINGERPRINT"
+  inviteId <- query @InviteIdentity identity1
+  submit identity1 do
+    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
+      publicKey = identity1Key
+
+  -- identity2 rejects invite
+  let
+    identity2Key = PublicKey with
+      publicKey = "IDENTITY2 KEY"
+      fingerprint = "IDENTITY2 FINGERPRINT"
+  inviteId <- query @InviteIdentity identity2
+  debug $ inviteId
+  submit identity2 do
+    exerciseCmd @InviteIdentity ((head inviteId)._1) RejectInvite
+
+  -- test identity3 just archiving contract
+  --inviteId <- queryContractKey @InviteIdentity owner (owner,identity3)
+  --if (isSome inviteId) then
+  --  submit owner do
+  --    let contractId = fromSome inviteId
+  --    archiveCmd contractId._1
+  --else
+  --  debug $ "No invite found"
+
+  let
+    identity1Key = PublicKey with
+      publicKey = "IDENTITY1 KEY"
+      fingerprint = "IDENTITY1 FINGERPRINT"
+  inviteId <- query @InviteIdentity identity3
+  submit identity3 do
+    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
+      publicKey = identity1Key
+
+  ownerId <- query @IdentityController owner 
+  let 
+    newOwnerCid = (head ownerId)._1
+  submit owner do
+    exerciseCmd @IdentityController newOwnerCid RemoveIdentity with
+      follower = identity3
+
+  return ()
+
+-- Bad owner key
+unhappyPath1 : Script ()
+unhappyPath1 = script do
+  testParties@TestParties{..} <- setupParties
+
+  let 
+    ownerKey = PublicKey with
+      publicKey = ""
+      fingerprint = "OWNER FINGERPRINT"
+  ownerId <- submitMustFail owner do
+    createCmd IdentityController with
+      owner
+      publicKey = ownerKey
+      following = []
+  return ()
+
+-- Bad invitee key
+unhappyPath2 : Script ()
+unhappyPath2 = script do
+  testParties@TestParties{..} <- setupParties
+
+  let 
+    ownerKey = PublicKey with
+      publicKey = "OWNER KEY"
+      fingerprint = "OWNER FINGERPRINT"
+  ownerId <- submit owner do
+    createCmd IdentityController with
+      owner
+      publicKey = ownerKey
+      following = []
+
+  submit owner do
+    exerciseCmd @IdentityController ownerId InviteNewIdentity with
+      invitee = identity1
+
+  let
+    identity1Key = PublicKey with
+      publicKey = ""
+      fingerprint = ""
+  inviteId <- query @InviteIdentity identity1
+  submitMustFail identity1 do
+    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
+      publicKey = identity1Key
+
