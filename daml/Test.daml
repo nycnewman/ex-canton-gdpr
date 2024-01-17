@@ -1,131 +1,114 @@
 module Test where
 
 import Daml.Script
-import DA.List
-import DA.Optional
-
+--import DA.List
+import Setup
 import IdentityManagement
+--import DA.Optional
 
-testHappyPath : Script ()
-testHappyPath = script do
+testSharedGroup = script do
   testParties@TestParties{..} <- setupParties
 
   let 
     ownerKey = PublicKey with
       publicKey = "OWNER KEY"
       fingerprint = "OWNER FINGERPRINT"
-  ownerId <- submit owner do
-    createCmd IdentityController with
-      owner
-      publicKey = ownerKey
-      following = []
 
-  submit owner do
-    exerciseCmd @IdentityController ownerId InviteNewIdentity with
+  groupId <- submit owner do
+    createCmd IdentityGroup with
+      owner
+      members = []
+      id = "123"
+
+  groupId <- submit owner do
+    exerciseCmd @IdentityGroup groupId InviteNewMember with
       invitee = identity1
 
-  ownerId <- query @IdentityController owner 
-  let 
-    newOwnerCid = (head ownerId)._1
-  submit owner do
-    exerciseCmd @IdentityController newOwnerCid InviteNewIdentity with
+  groupId <- submit owner do
+    exerciseCmd @IdentityGroup groupId InviteNewMember with
       invitee = identity2
 
-  ownerId <- query @IdentityController owner 
-  let 
-    newOwnerCid = (head ownerId)._1
-  submit owner do
-    exerciseCmd @IdentityController newOwnerCid InviteNewIdentity with
+  groupId <- submit owner do
+    exerciseCmd @IdentityGroup groupId InviteNewMember with
       invitee = identity3
 
-  -- identity1 accepts invite and provides public key
-  let
+  group456Id <- submit owner do
+    createCmd IdentityGroup with
+      owner
+      members = []
+      id = "456"
+
+  group456Id <- submit owner do
+    exerciseCmd @IdentityGroup group456Id InviteNewMember with
+      invitee = identity4
+
+  let 
     identity1Key = PublicKey with
       publicKey = "IDENTITY1 KEY"
       fingerprint = "IDENTITY1 FINGERPRINT"
-  inviteId <- query @InviteIdentity identity1
-  submit identity1 do
-    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
+
+  key1Id <- submit identity1 do
+    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
+      member = identity1
       publicKey = identity1Key
 
-  -- identity2 rejects invite
-  let
+  let 
     identity2Key = PublicKey with
       publicKey = "IDENTITY2 KEY"
       fingerprint = "IDENTITY2 FINGERPRINT"
-  inviteId <- query @InviteIdentity identity2
-  debug $ inviteId
-  submit identity2 do
-    exerciseCmd @InviteIdentity ((head inviteId)._1) RejectInvite
 
-  -- test identity3 just archiving contract
-  --inviteId <- queryContractKey @InviteIdentity owner (owner,identity3)
-  --if (isSome inviteId) then
-  --  submit owner do
-  --    let contractId = fromSome inviteId
-  --    archiveCmd contractId._1
-  --else
-  --  debug $ "No invite found"
-
-  let
-    identity1Key = PublicKey with
-      publicKey = "IDENTITY1 KEY"
-      fingerprint = "IDENTITY1 FINGERPRINT"
-  inviteId <- query @InviteIdentity identity3
-  submit identity3 do
-    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
+  key2Id <- submit identity2 do
+    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
+      member = identity2
       publicKey = identity1Key
 
-  ownerId <- query @IdentityController owner 
   let 
-    newOwnerCid = (head ownerId)._1
-  submit owner do
-    exerciseCmd @IdentityController newOwnerCid RemoveIdentity with
-      follower = identity3
+    identity1Key = PublicKey with
+      publicKey = "IDENTITY3 KEY"
+      fingerprint = "IDENTITY3 FINGERPRINT"
+
+  key3Id <- submit identity3 do
+    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
+      member = identity3
+      publicKey = identity1Key
+
+  -- result <- submit identity1 do
+  --   exerciseCmd @IdentityGroup groupId FetchMemberKey with
+  --     member = owner
+  --     actor = identity1
+  -- debug $ result
+
+  return (groupId, testParties)
+
+testEncryption = script do
+
+  (groupId, testParties@TestParties{..}) <- testSharedGroup
+  groupId <- submit owner do
+    createCmd EncryptionKey with
+      owner = owner
+      groupId = "123"
+      id = "11111"
+      wrappedKey = "wrapper DEK"
+
+  let 
+    encryption : Encryption = EncAES256 with
+        groupId = "123"
+        keyId = "11111"
+        iv = "long IV"
+    dataValue = "encrypted-PII"
+    privateData : PrivateData = OnLedger with
+      encryption
+      dataValue
+
+  groupId <- submit owner do
+    createCmd DataSubject with
+      id = "812398761983276"
+      owner = owner
+      publicData1 = "open text 1"
+      publicData2 = "open text 2"
+      privateData = Some privateData
+      subprocessors = [owner]
 
   return ()
 
--- Bad owner key
-unhappyPath1 : Script ()
-unhappyPath1 = script do
-  testParties@TestParties{..} <- setupParties
-
-  let 
-    ownerKey = PublicKey with
-      publicKey = ""
-      fingerprint = "OWNER FINGERPRINT"
-  ownerId <- submitMustFail owner do
-    createCmd IdentityController with
-      owner
-      publicKey = ownerKey
-      following = []
-  return ()
-
--- Bad invitee key
-unhappyPath2 : Script ()
-unhappyPath2 = script do
-  testParties@TestParties{..} <- setupParties
-
-  let 
-    ownerKey = PublicKey with
-      publicKey = "OWNER KEY"
-      fingerprint = "OWNER FINGERPRINT"
-  ownerId <- submit owner do
-    createCmd IdentityController with
-      owner
-      publicKey = ownerKey
-      following = []
-
-  submit owner do
-    exerciseCmd @IdentityController ownerId InviteNewIdentity with
-      invitee = identity1
-
-  let
-    identity1Key = PublicKey with
-      publicKey = ""
-      fingerprint = ""
-  inviteId <- query @InviteIdentity identity1
-  submitMustFail identity1 do
-    exerciseCmd @InviteIdentity ((head inviteId)._1) AcceptInvite with
-      publicKey = identity1Key
 

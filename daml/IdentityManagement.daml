@@ -1,126 +1,138 @@
 module IdentityManagement where
 
-import Daml.Script
+--import DA.Optional
+--import DA.Exception
+import DA.List
+
+template EncryptionKey 
+  with
+    id : Text
+    owner : Party
+    groupId: Text
+    wrappedKey: Text
+
+  where
+    signatory owner
+  
+    key (owner, groupId, id) : (Party, Text, Text)
+    maintainer key._1
+
+template SharedKey 
+  with
+    id : Text
+    groupId: Text
+    owner : Party
+    recipient : Party
+    wrappedKey: Text
+
+  where
+    signatory owner
+    observer recipient
+  
+    key (owner, recipient, groupId, id) : (Party, Party, Text, Text)
+    maintainer key._1
+
+data Encryption
+  = EncNone
+    -- ^ No encryption, the file is in plain text.
+  | EncAES256 with groupId: Text, keyId: Text, iv: Text
+    -- ^ 256-bit AES encryption, CBC mode, PKCS5 padding
+  deriving (Eq, Show)
+
+data PrivateData
+  = OnLedger with encryption: Encryption, dataValue: Text
+  | OffLedger with encryption: Encryption, dataLocation: Text
+    deriving (Eq, Show)
+
+isEncNone : Encryption -> Bool
+isEncNone EncNone = True
+isEncNone _ = False
+
+template DataSubject with
+    id: Text
+    owner: Party
+    subprocessors: [Party]
+    publicData1: Text
+    publicData2: Text
+    privateData: Optional PrivateData
+  where
+    signatory owner
+    observer subprocessors
 
 data PublicKey = PublicKey with
     publicKey : Text
     fingerprint : Text
       deriving (Eq,Show)
 
-template IdentityController with
+template IdentityGroup with
     owner : Party
-    publicKey : PublicKey
-    following : [Party]
+    id: Text
+    members : [Party]
   where
     signatory owner
-    observer following
+    observer members
 
-    ensure (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+    key (owner, id) : (Party, Text)
+    maintainer key._1
 
-    choice InviteNewIdentity : ContractId InviteIdentity with
+    choice InviteNewMember : ContractId IdentityGroup with
       invitee : Party
 
         controller owner
 
         do
           create this with 
-            following = invitee :: following
-          create InviteIdentity with 
+            members = dedup (invitee :: members)
+
+    choice RevokeMember : ContractId IdentityGroup with
+      member : Party
+
+        controller members
+ 
+        do
+          -- assert (owner /= member)
+          create this with
+            members = filter (/=member) members
+
+    nonconsuming choice RegisterPublicKey : ContractId RegisteredIdentity with
+      member: Party
+      publicKey: PublicKey
+
+        controller member
+        
+        do
+          -- need check that they haven't registered a key previously
+          assert (member `elem` (members) )
+          assertMsg "PublicKey is invalid" (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+
+          create RegisteredIdentity with 
+            groupId = id
             owner
-            invitee
+            identity = member
+            publicKey
 
-    choice RemoveIdentity : ContractId IdentityController with
-        follower : Party
+    nonconsuming choice FetchMemberKey : (ContractId RegisteredIdentity, RegisteredIdentity) with
+      member: Party
+      actor: Party
 
-      controller owner
-
-      do
-        currentRecord <- fetchByKey @RegisteredIdentity (owner, follower)
-        archive currentRecord._1
-        create this with
-          following = following
-    
-    nonconsuming choice GetPublicKey : PublicKey
-      controller owner, following
-      do
-        return publicKey
-
-template InviteIdentity 
-  with
-    owner : Party
-    invitee : Party
-
-  where
-    signatory owner
-    observer invitee
-
-    key (owner, invitee) : (Party, Party)
-    maintainer key._1
-
-    choice AcceptInvite : ContractId RegisteredIdentity with
-        publicKey : PublicKey
-        
-      controller invitee
-      do
-        assertMsg "Invalid Public Key" (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
-        
-        create RegisteredIdentity with 
-          owner
-          identity = invitee
-          publicKey
-        
-
-    choice RejectInvite : () with
-        
-      controller invitee
-      do
-        return ()
-
+        controller actor
+      
+        do
+          assert (actor `elem` (owner :: members) )
+          fetchByKey @RegisteredIdentity (owner, member, id)
+          
 template RegisteredIdentity with
     owner : Party
+    groupId : Text
     identity : Party
     publicKey : PublicKey
   where
     signatory owner
     observer identity
 
-    key (owner, identity) : (Party, Party)
+    key (owner, identity, groupId) : (Party, Party, Text)
     maintainer key._1
 
     ensure (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
 
-data TestParties = TestParties with
-  owner : Party
-  identity1 : Party
-  identity2 : Party
-  identity3 : Party
-
-setupParties: Script TestParties
-setupParties = script do
-  owner <- allocatePartyWithHint "Data_Owner" (PartyIdHint "Data_Owner")
-  identity1 <- allocatePartyWithHint "DataProcessor_1" (PartyIdHint "Data Processor_1")
-  identity2 <- allocatePartyWithHint "DataProcessor_2" (PartyIdHint "Data Processor_2")
-  identity3 <- allocatePartyWithHint "DataProcessor_3" (PartyIdHint "Data Processor_3")
-
-  ownerId <- validateUserId "Data_Owner"
-  identity1Id <- validateUserId "DataProcessor_1"
-  identity2Id <- validateUserId "DataProcessor_2"
-  identity3Id <- validateUserId "DataProcessor_3"
-
-  createUser (User ownerId (Some owner)) [CanActAs owner]
-  createUser (User identity1Id (Some identity1)) [CanActAs identity1]
-  createUser (User identity2Id (Some identity2)) [CanActAs identity2]
-  createUser (User identity3Id (Some identity3)) [CanActAs identity3]
-
-  return $ TestParties with
-    owner = owner
-    identity1 = identity1
-    identity2 = identity2
-    identity3 = identity3
-
-setup: Script ()
-setup = script do 
-  testParties@TestParties{..} <- setupParties
-
-  return ()
 

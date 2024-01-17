@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "ex-canton-gdpr"
+version = "0.1.0"
+description = ""
+authors = ["Edward Newman <edward@digitalasset.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+dazl = "^7.6.3"
+cryptography = "41.0.7"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

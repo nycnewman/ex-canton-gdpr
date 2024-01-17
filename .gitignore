@@ -7,3 +7,17 @@ node_modules
 *.log
 
 ui/daml.js
+
+MANIFEST
+dist/
+
+.idea
+.venv
+log/*
+ex-canton-gdpr.iml
+
+
+
+
+
+
