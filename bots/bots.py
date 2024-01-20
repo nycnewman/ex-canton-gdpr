@@ -3,6 +3,7 @@ import asyncio
 import random
 import string
 import json
+import argparse
 
 import dazl
 from dazl.ledgerutil import ACS
@@ -11,8 +12,9 @@ import pprint
 import os
 import sys
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from dataclasses_json import dataclass_json
+from typing import List
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
@@ -20,19 +22,25 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-logging.basicConfig(filename="app.log", level=logging.DEBUG)
-
 @dataclass
 class Config:
     url: str
 
+@dataclass_json
 @dataclass
 class RSAKey:
+    name: str
     private_key: str
     public_key: str
     public_base64: str
     public_fingerprint: str
 
+@dataclass_json
+@dataclass
+class RSAKeys:
+    keys: List[RSAKey]
+
+@dataclass_json
 @dataclass
 class EncryptionKey:
     id: str
@@ -43,10 +51,12 @@ class WrappedEncryptionKey:
     id: str
     wrapped_base64: str
 
+@dataclass_json
 @dataclass
 class PartyConfig:
-    party: str
-    rsa_key: RSAKey
+    name: str # short name
+    party: str # Party ID on ledger
+    rsa_key: RSAKey # RSA key for user
 
 @dataclass
 class GroupConfig:
@@ -82,35 +92,69 @@ def trim_zeros(value):
         value = value[:-1]
     return(value)
 
-def create_rsa_key():
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-    )
+def create_rsa_key(owner: str):
 
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption()
-    )
+    rsa_keys = RSAKeys( [] )
+    keys_filename = 'keys.json'
+    if os.path.isfile(keys_filename):
+        f = open(keys_filename, 'r')
+        keys_json = f.read()
+        f.close()
+        if keys_json != "":
+            rsa_keys = RSAKeys.schema().loads(keys_json)
 
-    public_key = private_key.public_key()
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
+    found_key = None
+    if rsa_keys != []:
+        for key in rsa_keys.keys:
+            if key.name == owner:
+                found_key = key
+                break
 
-    public_base64 = (base64.b64encode(public_pem)).decode()
+    if found_key != None:
+        rsa_key = RSAKey (
+            found_key.name,
+            serialization.load_pem_private_key(found_key.private_key.encode('utf-8'), password=None),
+            serialization.load_pem_public_key(found_key.public_key.encode('utf-8')),
+            found_key.public_base64,
+            found_key.public_fingerprint
+        )
+        return( rsa_key )
+    else:
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+        )
 
-    public_fingerprint = "1234567890"
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        )
 
-    rsa_key = RSAKey( private_key, public_key, public_base64, public_fingerprint)
+        public_key = private_key.public_key()
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
 
-    return rsa_key
+        public_base64 = (base64.b64encode(public_pem)).decode()
 
-def create_dek_key():
+        public_fingerprint = "1234567890"
+
+        rsa_key = RSAKey( owner, private_key, public_key, public_base64, public_fingerprint)
+        disk_key = RSAKey( owner, private_pem, public_pem, public_base64, public_fingerprint)
+
+        rsa_keys.keys.append( disk_key  )
+
+        f = open(keys_filename, 'w')
+        f.write(RSAKeys.schema().dumps(rsa_keys))
+        f.close()
+
+        return rsa_key
+
+def create_dek_key(key_id: str):
     key = os.urandom(32)
-    key_id = ''.join(random.choices(string.digits + string.digits, k = 10))
+    #key_id = ''.join(random.choices(string.digits + string.digits, k = 10))
     return( EncryptionKey(key_id, key) )
 
 def wrap_dek_key(public_key: str, dek_key: str):
@@ -141,7 +185,7 @@ def unwrap_dek_key(private_key: str, wrapped_key: str):
                 )
             )
         except Exception as e:
-            print("UDK: Decryption failed - check keys")
+            #print("UDK: Decryption failed - check keys")
             print(e)
             return( None )
 
@@ -242,9 +286,9 @@ async def validate_registration(config: Config, party : PartyConfig):
 
 
                 for groupId in group_contracts:
-                    if party.party == group_contracts[groupId].payload["owner"]:
-                        # Ignore owner of group
-                        continue
+                    #if party.party == group_contracts[groupId].payload["owner"]:
+                    #    # Ignore owner of group
+                    #    continue
 
                     if groupId not in registrations:
                         # register a RegisteredIdentity record
@@ -351,18 +395,14 @@ async def distribute_keys(config: Config, party : PartyConfig):
                 distributed_keys = {}
                 async with conn.query("IdentityManagement:SharedKey") as stream:
                     async for event in stream.creates():
-                        #print(event.payload)
                         shared_key_id = event.payload["id"]
                         group_id = event.payload['groupId']
                         recipient = event.payload["recipient"]
 
                         key_array = distributed_keys.get(group_id, {})
-                        #print(key_array)
                         key_array[shared_key_id] = key_array.get(shared_key_id, [])
                         key_array[shared_key_id].append(event)
-                        #print(key_array)
                         distributed_keys[group_id] = key_array
-                        #print("Distributed Keys: {}".format(distributed_keys))
 
                 for groupId in group_contracts:
                     expected_members = group_contracts[groupId].payload["members"]
@@ -376,7 +416,7 @@ async def distribute_keys(config: Config, party : PartyConfig):
                         plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
 
                         if plaintext_key == None:
-                            print("distribute_keys: Decryption failed - check keys")
+                            print("distribute_keys: Decryption failed - check keys ({})".format(party.party))
                             continue
 
                         current_shared = []
@@ -430,17 +470,38 @@ async def distribute_keys(config: Config, party : PartyConfig):
         await asyncio.sleep(2)
 
 @log_cancellation
-async def create_data_subject(config: Config, owner: PartyConfig, group: GroupConfig, encryption_key: EncryptionKey, subprocessors: [PartyConfig], original_data: str ):
+async def create_data_subject(config: Config, owner: PartyConfig, group: GroupConfig, key_id: str, subprocessors: [PartyConfig], public_data1: str, public_data2: str, private_data: str ):
     try:
+        encryption_keys = {}
+        async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
+            async with conn.query("IdentityManagement:EncryptionKey") as stream:
+                async for event in stream.creates():
+                    key_array = encryption_keys.get(event.payload['groupId'], [])
+                    key_array.append(event)
+                    encryption_keys[event.payload['groupId']] = key_array
+
+        plaintext_key = None
+        for key_contract in encryption_keys.get(group.id, []):
+            print(key_contract.payload)
+            contract_id = key_contract.contract_id
+            found_key_id = key_contract.payload['id']
+            wrapped_key = key_contract.payload['wrappedKey']
+            if found_key_id == key_id:
+                plaintext_key = unwrap_dek_key(owner.rsa_key.private_key, wrapped_key)
+
+        if plaintext_key == None:
+            print("ERROR: Not able to retrieve encryption key")
+            exit(1)
+
         data_subject_id = ''.join(random.choices(string.digits + string.digits, k = 10))
 
-        (iv, encrypted_data) = encrypt_data_payload(encryption_key.key, original_data)
+        (iv, encrypted_data) = encrypt_data_payload(plaintext_key, private_data)
 
         private_data = {
             "OnLedger" : {
                 'encryption' : {
                     'EncAES256': {
-                        'keyId' : encryption_key.id,
+                        'keyId' : key_id,
                         'groupId' : group.id,
                         'iv' : iv
                     }
@@ -454,8 +515,8 @@ async def create_data_subject(config: Config, owner: PartyConfig, group: GroupCo
         contract = { 
             'owner' : owner.party, 
             'id' : data_subject_id, 
-            'publicData1' : "open text 1",
-            'publicData2' : "open text 2",
+            'publicData1' : public_data1,
+            'publicData2' : public_data2,
             'privateData' : private_data,
             'subprocessors' : subprocessors_ids 
         }
@@ -484,18 +545,19 @@ async def dump_data_subjects(config: Config, party: PartyConfig):
                 distributed_keys = {}
                 async with conn.query("IdentityManagement:SharedKey") as stream:
                     async for event in stream.creates():
-                        key_array = distributed_keys.get(event.payload['groupId'], {})
-                        key_array[event.payload["id"]] = event
+                        key_array = distributed_keys.get(str(event.payload['groupId']), {})
+                        key_array[str(event.payload["id"])] = event
                         distributed_keys[event.payload['groupId']] = key_array
                 
                 for contract in contracts:
+                    privateData = None
                     if contracts[contract]['privateData'].get('OnLedger', None) != None:
-                        group_id = contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['groupId']
-                        enc_key_id = contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['keyId']
-                        privateData = None
+                        group_id = str(contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['groupId'])
+                        enc_key_id = str(contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['keyId'])
+                        
 
                         if distributed_keys.get(group_id, None) == None:
-                            print("DDS: No key available to decrypt contract (1)")
+                            print("DDS: No key available to decrypt contract (1) ({})".format(party.party))
                             print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
                             continue
 
@@ -506,15 +568,17 @@ async def dump_data_subjects(config: Config, party: PartyConfig):
                             plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
 
                             if plaintext_key == None:
-                                print("DDS: Decryption of key not possible")
+                                print("DDS: Decryption of key not possible (2) ({})".format(party.party))
                                 privateData = None
+                                print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
                                 continue
                             else:
                                 privateData = unencrypt_data_payload(plaintext_key, contracts[contract]['privateData'])
                                 #print(privateData)
                                 print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
                         else:
-                            print("DDS: No key available to decrypt contract (2)")
+                            print("DDS: No key available to decrypt contract (3) ({})".format(party.party))
+                            print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
 
                 await conn.close()
             await asyncio.sleep(5)
@@ -526,63 +590,41 @@ async def dump_data_subjects(config: Config, party: PartyConfig):
             print(e)
             print("DDS: Exiting: {}".format(party.party))
 
-async def runtasks(config : Config, identities: [PartyConfig]):
-    
-    (owner, identity1, identity2, identity3, identity4, identity5) = identities
+async def run_automation(config : Config, identity: PartyConfig):
 
-    task1 = asyncio.create_task(validate_registration(config, owner))
-    task2 = asyncio.create_task(validate_registration(config, identity1))
-    task3 = asyncio.create_task(validate_registration(config, identity2))
-    task4 = asyncio.create_task(validate_registration(config, identity3))
-    task5 = asyncio.create_task(validate_registration(config, identity4))
-    task6 = asyncio.create_task(validate_registration(config, identity5))
+    task1 = asyncio.create_task(validate_registration(config, identity))
+    task2 = asyncio.create_task(dump_data_subjects(config, identity))
+    task3 = asyncio.create_task(distribute_keys(config, identity))
 
-    task7 = asyncio.create_task(dump_data_subjects(config, identity1))
-    task8 = asyncio.create_task(dump_data_subjects(config, identity2))
-    task9 = asyncio.create_task(dump_data_subjects(config, identity5))
+    await asyncio.gather(task1, task2, task3)
 
-    #task13 = asyncio.create_task(dump_contracts(config, owner))
-    task10 = asyncio.create_task(distribute_keys(config, owner))
+async def run_group(config : Config, identity: PartyConfig, group: GroupConfig):
+    await setup_group(config, identity, group)
 
-    group = GroupConfig("123456789")
+async def run_invite(config : Config, identity: PartyConfig, group: GroupConfig, invitee: PartyConfig):
+    await invite_party(config, identity, group, invitee)
 
-    await setup_group(config, owner, group)
-    await asyncio.sleep(3)
-    await invite_party(config, owner, group, identity1)
-    await asyncio.sleep(3)
-    await invite_party(config, owner, group, identity2)
-    await asyncio.sleep(3)
-    await invite_party(config, owner, group, identity3)
-    await asyncio.sleep(3)
-    await invite_party(config, owner, group, identity4)
-    await asyncio.sleep(3)
 
-    encryption_key1 = create_dek_key()
-    wrapped_key1 = WrappedEncryptionKey(encryption_key1.id, wrap_dek_key(owner.rsa_key.public_key, encryption_key1.key))
-    await register_key(config, owner, group, wrapped_key1)
-    original_data = {
-        "SSN" : "123456789",
-        "DOB" : "01 Jan 2024",
-        "Medical ID" : "987654321"
-    }
-    await create_data_subject(config, owner, group, encryption_key1, [identity1, identity5], original_data)
+async def run_dek_key(config : Config, identity: PartyConfig, group: GroupConfig, key_id: str):
+    encryption_key = create_dek_key(key_id)
+    wrapped_key = WrappedEncryptionKey(encryption_key.id, wrap_dek_key(identity.rsa_key.public_key, encryption_key.key))
+    await register_key(config, identity, group, wrapped_key)
 
-    encryption_key2 = create_dek_key()
-    wrapped_key2 = WrappedEncryptionKey(encryption_key2.id, wrap_dek_key(owner.rsa_key.public_key, encryption_key2.key))
-    await register_key(config, owner, group, wrapped_key2)
-    original_data = {
-        "SSN" : "999999999",
-        "DOB" : "01 Jan 2022",
-        "Medical ID" : "987654322"
-    }
-    await create_data_subject(config, owner, group, encryption_key2, [identity1, identity2], original_data)
+async def run_data_subject(config : Config, identity: PartyConfig, group: GroupConfig, encryption_key_id: str, invitees: [PartyConfig], public_data1: str, public_data2: str, private_data: str):
+    await create_data_subject(config, identity, group, encryption_key_id, invitees, public_data1, public_data2, private_data)
 
-    await asyncio.gather(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10)
-
+def string_to_party(party_name: str, parties: [PartyConfig]):
+    found = None
+    for party in parties:
+        if party_name == party.name:
+            found = party
+    return( found )
 
 def main(argv):
 
+    # Load parties from parties.json (output of a Daml Script)
     parties = None
+    party_names = []
     parties_filename = 'parties.json'
     if os.path.isfile(parties_filename):
         f = open(parties_filename, 'r')
@@ -590,24 +632,82 @@ def main(argv):
         f.close()
         parties = Parties.schema().loads(parties_json)
 
-    #group_id = ''.join(random.choices(string.digits + string.digits, k = 10))
+        party_names = [x.name for x in fields(parties)]
+    else:
+        print("ERROR: Please run Daml Script to extract party IDs first")
+        exit(1)
+
+    # Generate or load keys for each party
+    owner = PartyConfig("owner", parties.owner, create_rsa_key("owner"))
+    identity1 = PartyConfig("identity1", parties.identity1, create_rsa_key("identity1"))
+    identity2 = PartyConfig("identity2", parties.identity2, create_rsa_key("identity2"))
+    identity3 = PartyConfig("identity3", parties.identity3, create_rsa_key("identity3"))
+    identity4 = PartyConfig("identity4", parties.identity4, create_rsa_key("identity4"))
+    identity5 = PartyConfig("identity5", parties.identity5, create_rsa_key("identity5"))
+    party_list = [owner, identity1, identity2, identity3, identity4, identity5]
+
+    parser = argparse.ArgumentParser(description='ex-canton-gdpr')
+    parser.add_argument('--url', default="http://localhost:6865", help='URL of ledger (defaults to http://localhost:6865')
+    parser.add_argument('-p', '--party', choices=party_names, help='Select which party is being running these commands')
+    subparser = parser.add_subparsers(dest='command')
+    daemon = subparser.add_parser('daemon', help='run automation for identity')
+    invite = subparser.add_parser('invite', help='Invite a party to a group')
+    invite.add_argument('--group_id', type=int, help='Provided group id', required=True)
+    invite.add_argument('--target', action="append", choices=party_names, help='Invite a party to a group', required=True)
+    group = subparser.add_parser('group',help='Create group with provided id')
+    group.add_argument('group_id', nargs=1,  type=int, help='Create group with provided id')
+    encryption = subparser.add_parser('create_encryption', help='Create a new DEK encryption key with id')
+    encryption.add_argument('group_id', nargs=1,  type=int, help='id for group')
+    encryption.add_argument('id', nargs=1,  type=int, help='id for key')
+    subject = subparser.add_parser('create_subject', help='Create a new data subject record')
+    subject.add_argument('--target', action="append", choices=party_names, help='Part(ies) to share a subject record', required=True)
+    subject.add_argument('group_id', nargs=1,  type=int, help='id for group')
+    subject.add_argument('key_id', nargs=1,  type=int, help='id for key')
+    subject.add_argument('public_data1', nargs=1,  type=str, help='public_data1')
+    subject.add_argument('public_data2', nargs=1,  type=str, help='public_data2')
+    subject.add_argument('private_data', nargs=1,  type=str, help='private data (e.g. json)')
+    args = parser.parse_args()
+
+    logging.basicConfig(filename=args.party + ".log", level=logging.DEBUG)
+
+    run_as_party = string_to_party(args.party, party_list)
+    if run_as_party == None:
+        print("ERROR: No party specific")
+        exit(1)
+
     config = Config("http://localhost:6865")
 
-    rsa_key = create_rsa_key()
-    owner = PartyConfig(parties.owner, rsa_key)
-    rsa_key = create_rsa_key()
-    identity1 = PartyConfig(parties.identity1, rsa_key)
-    rsa_key = create_rsa_key()
-    identity2 = PartyConfig(parties.identity2, rsa_key)
-    rsa_key = create_rsa_key()
-    identity3 = PartyConfig(parties.identity3, rsa_key)
-    rsa_key = create_rsa_key()
-    identity4 = PartyConfig(parties.identity4, rsa_key)
-    rsa_key = create_rsa_key()
-    identity5 = PartyConfig(parties.identity5, rsa_key)
+    print("ex-canton-gdpr: Encryption on Daml/Canton ledger")
+    print("URL: {}".format(args.url))
+    print("ActAs: {} {}".format(args.party, run_as_party.party))
 
-    asyncio.run( runtasks(config, [owner, identity1, identity2, identity3, identity4, identity5] ) )
+    if args.command == "daemon":
+        print("Daemon mode".format(args.party))
+        asyncio.run( run_automation(config, run_as_party ) )
+    elif args.command == "group":
+        print("Creating group: {}".format(str(args.group_id[0])))
+        group = GroupConfig( str( args.group_id[0] ) )
+        asyncio.run( run_group(config, run_as_party, group ) )
+    elif args.command == "invite":
+        print("Invite parties: {} {}".format(args.group_id, args.target))
+        group = GroupConfig(str(args.group_id))
+        for invitee in args.target:
+            target = string_to_party(invitee, party_list)
+            if target == None:
+                print("ERROR: Bad invitee")
+                exit(1)
+            asyncio.run( run_invite(config, run_as_party, group, target ) )
+    elif args.command == "create_encryption":
+        print("Create encryption key: {} {}".format(args.group_id[0], args.id[0]))
+        group = GroupConfig(str(args.group_id[0]))
+        asyncio.run( run_dek_key(config, run_as_party, group, args.id[0] ) )
+    elif args.command == "create_subject":
+        print("Create data subject record: {} {} {} {} {} {}".format(args.group_id[0], args.key_id[0], args.target, args.public_data1, args.public_data2, args.private_data))
+        invitees = [string_to_party(x, party_list) for x in args.target]
+        group = GroupConfig(str(args.group_id[0]))
+        asyncio.run( run_data_subject(config, run_as_party, group, str(args.key_id[0]), invitees, args.public_data1, args.public_data2, args.private_data ) )
 
+    exit(0)
 
 if __name__ == '__main__':
   main(sys.argv[1:])

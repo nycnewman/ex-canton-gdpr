@@ -87,7 +87,7 @@ template IdentityGroup with
     choice RevokeMember : ContractId IdentityGroup with
       member : Party
 
-        controller members
+        controller owner
  
         do
           -- assert (owner /= member)
@@ -102,7 +102,7 @@ template IdentityGroup with
         
         do
           -- need check that they haven't registered a key previously
-          assert (member `elem` (members) )
+          assert (member `elem` (owner :: members) )
           assertMsg "PublicKey is invalid" (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
 
           create RegisteredIdentity with 

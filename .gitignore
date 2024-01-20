@@ -16,7 +16,8 @@ dist/
 log/*
 ex-canton-gdpr.iml
 
-
+parties.json
+keys.json
 
 
 

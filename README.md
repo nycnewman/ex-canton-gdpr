@@ -8,17 +8,40 @@ Various privacy and payment regulations recommend the use of encryption to prote
 
 Daml/Canton provides protection without encryption in the following forms:
 
-- Native enforcement of access in the Daml data model and workflows
-- Native privacy through the partial, segmented distribution of data only to stakeholders and their participants
-- Ability to rune the ledger to remove archived copies of data ("Right to Forget")
+- Native enforcement of access in the Daml data model and workflows. 
+  - Parties can only see contracts for which they are stakeholders.
+- Native privacy through the partial, segmented distribution of data only to stakeholders and their participants. 
+  - Canton only replicates copies of contracts to participant nodes of stakeholder parties. Other participants are unaware of the transactions or data, nor receive a copy.
+- Ability to rune the ledger to remove archived copies of data ("Right to Forget"). 
+  - Canton allows for controlled pruning of the ledger contents to purge archive contracts 
 
-In many cases the above may be sufficient for your use case.
+In many cases, the above may be sufficient for your business use case.
 
 However, many companies demand additional protection in the form of data encryption. The goals of encryption include the following:
 
-- Protecting from Database Admin (DBA) access to cleartext copies of the data
+- Protecting from Database Admin (DBA) access to cleartext copies of the data in the DB
 - Protecting DB backups from containing cleartext copies of the data
-- Protecting a subset of shared data from parties who should see the cleartext copy but not the sensitive data
+- Protecting a subset of shared data from parties who should see the non-sensitive data but be restricted from accessing the sensitive data
+
+There are two fundamental concerns for encryption in distributed systems:
+- Distribution of the data encryption keys securing to relevant parties
+- Distribution or replication of the data
+
+This sample demonstrates:
+- Use of Daml workflows to manage set(s) of identities and ability to register off ledger public keys
+- Use of automation to use asymmetric encryption to secure data encryption keys and use Daml/Canton to distribute to participants
+- Demonstrate ability to differentiate between completely shared access to record and encrypted data, through to no access or only to non-sensitive fields
+
+For this example, we use RSA asymmetric encryption as Key Encryption Keys (KEK) to distribute the data encryption (DEK), which we use AES256-CTR keys.
+- Each part registers a public key through Daml (where some form of validation process could ensure it is the expected party)
+- The DEK keys are then distributed by encrypting using the registered public key of each recipient
+- We have also chosen a model where the "Data Controller" controls the group of recipients "Data Sub-processors". 
+  - Other variants could be implemented, such as shared ownership mode
+- An owner creates an AES256 key for data encryption and for each encryption, a new IV vector is assigned for each use of the key and stored alongside the encrypted payload
+
+It is important to recognise that any recipient that receives a copy of the data and the DEK key could potentially cache copies of the data locally. Therefore rotation of the 
+encryption keys would not be sufficient to ensure no further access to historical cached copies of data. This would need other, potentially legal or audit mechanisms, to 
+enforce proper deletion of all historical data.
 
 ## II. Workflow
 
@@ -32,11 +55,6 @@ A Data Owner (Controller) can create an IdentityGroup contract to manage a list 
   6. Data Controller can create DataSubject records with encrypted copies of the private data. The encryption uses AES256 symmetric encryption and an IV is generated for each copy of private data
   7. Each invited party can download the DataSubject data and decrypt the data by obtaining the DEK using their private key
   8. Parties who have visibility to the DataSubject contract but are not in the IdentityGroup cannot decrypt the encrypted data set
-
-This sample demonstrates:
-- Use of Daml workflows to manage set(s) of identities and ability to register off ledger public keys
-- Use of automation to use asymmetric encryption to secure data encryption keys and use Daml/Canton to distribute to participants
-- Demonstrate ability to differentiate between completely shared access to record and encrypted data, through to no access or only to non-sensitive fields
 
 ## III. Alteratives / Know Issues / TODOS
 
@@ -65,7 +83,7 @@ Run each of the following commands in a separate shell:
 * Start Automation in a separate window
 
 ```
-      run-owner.sh
+      run.sh
 ```
 
 This performs the following:
@@ -78,3 +96,29 @@ Expected Results:
 - Identity1 should see both data subject contracts and all private data
 - Identity2 should only see one data subject contract and be able to see private data
 - Identity5 should only see one data subject contract and not be able to decrypt the private data
+
+### Python Bot command
+
+See ```run.sh``` for examples
+
+poetry run python3 bots/bots.py --help
+usage: bots.py [-h] [--url URL] [-p {owner,identity1,identity2,identity3,identity4,identity5}]
+               {daemon,invite,group,create_encryption,create_subject} ...
+
+ex-canton-gdpr
+
+positional arguments:
+  {daemon,invite,group,create_encryption,create_subject}
+    daemon              run automation for identity
+    invite              Invite a party to a group
+    group               Create group with provided id
+    create_encryption   Create a new DEK encryption key with id
+    create_subject      Create a new data subject record
+
+options:
+  -h, --help            show this help message and exit
+  --url URL             URL of ledger (defaults to http://localhost:6865
+  -p {owner,identity1,identity2,identity3,identity4,identity5}, --party {owner,identity1,identity2,identity3,identity4,identity5}
+                        Select which party is being running these commands
+
+
