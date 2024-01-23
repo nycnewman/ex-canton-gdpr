@@ -2,6 +2,7 @@
 
 rm app.log
 
+daml deploy
 daml script --dar .daml/dist/ex-canton-gdpr-0.0.1.dar --ledger-host localhost --ledger-port 6865 --script-name Setup:setupParties --output-file parties.json
 
 #daml script --dar .daml/dist/ex-canton-gdpr-0.0.1.dar --ledger-host localhost --ledger-port 6865 --script-name Test:testSharedGroup

@@ -6,7 +6,6 @@ import json
 import argparse
 
 import dazl
-from dazl.ledgerutil import ACS
 
 import pprint
 import os
@@ -139,7 +138,11 @@ def create_rsa_key(owner: str):
 
         public_base64 = (base64.b64encode(public_pem)).decode()
 
-        public_fingerprint = "1234567890"
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(public_base64)
+        digest_bytes = digest.finalize()
+
+        public_fingerprint = digest_bytes.hex()
 
         rsa_key = RSAKey( owner, private_key, public_key, public_base64, public_fingerprint)
         disk_key = RSAKey( owner, private_pem, public_pem, public_base64, public_fingerprint)
@@ -333,17 +336,24 @@ async def invite_party(config, owner:PartyConfig, group: GroupConfig, invitee:Pa
 @log_cancellation
 async def dump_contracts(config, party):
     while True:
-        contracts = {}
+        events = []
         async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
-            async with conn.query("*") as stream:
-
-                @stream.on_create
-                def _(event):
-                    contracts[event.contract_id] = event.payload
-
-                await stream.run()
-            await conn.close()
-        pprint.pprint(contracts)
+            async with conn.stream("*", offset='000000000000000000') as stream:
+                async for event in stream:
+                    try: 
+                        print(event)
+                        if isinstance(event, (dazl.ledger.CreateEvent)):
+                            print("Dump: Create {} {}".format(event.contract_id, event.payload))
+                        elif isinstance(event, dazl.ledger.ArchiveEvent):
+                            print("Dump: Archive {}".format(event.contract_id))
+                        elif isinstance(event, dazl.ledger.Boundary):
+                            print("Dump: Boundary {}".format(event.offset))
+                    except Exception as e:
+                        exc_type, exc_obj, exc_tb = sys.exc_info()
+                        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                        print(exc_type, fname, exc_tb.tb_lineno)
+                        logging.debug(e)
+                        print(e)
 
 @log_cancellation
 async def register_key(config:Config, owner: PartyConfig, group: GroupConfig, key: WrappedEncryptionKey):
@@ -595,7 +605,7 @@ async def run_automation(config : Config, identity: PartyConfig):
     task1 = asyncio.create_task(validate_registration(config, identity))
     task2 = asyncio.create_task(dump_data_subjects(config, identity))
     task3 = asyncio.create_task(distribute_keys(config, identity))
-
+    
     await asyncio.gather(task1, task2, task3)
 
 async def run_group(config : Config, identity: PartyConfig, group: GroupConfig):
@@ -613,6 +623,9 @@ async def run_dek_key(config : Config, identity: PartyConfig, group: GroupConfig
 async def run_data_subject(config : Config, identity: PartyConfig, group: GroupConfig, encryption_key_id: str, invitees: [PartyConfig], public_data1: str, public_data2: str, private_data: str):
     await create_data_subject(config, identity, group, encryption_key_id, invitees, public_data1, public_data2, private_data)
 
+async def run_dump_contracts(config : Config, identity: PartyConfig):
+    await dump_contracts(config, identity)
+
 def string_to_party(party_name: str, parties: [PartyConfig]):
     found = None
     for party in parties:
@@ -620,7 +633,23 @@ def string_to_party(party_name: str, parties: [PartyConfig]):
             found = party
     return( found )
 
+async def test_party(config: Config):
+    async with dazl.connect(url=config.url, admin=True) as conn:
+        users = await conn.list_users()
+    
+        for user in users:
+            print("{} {}".format( user.id, user.primary_party ))
+
+        parties = await conn.list_known_parties()
+
+        for party in parties:
+            print("{} {} {}".format( party.party, party.display_name, party.is_local ))
+
 def main(argv):
+
+    config = Config("http://localhost:6865")
+    asyncio.run( test_party(config ) )
+    exit(1)
 
     # Load parties from parties.json (output of a Daml Script)
     parties = None
@@ -666,6 +695,7 @@ def main(argv):
     subject.add_argument('public_data1', nargs=1,  type=str, help='public_data1')
     subject.add_argument('public_data2', nargs=1,  type=str, help='public_data2')
     subject.add_argument('private_data', nargs=1,  type=str, help='private data (e.g. json)')
+    dump_contracts = subparser.add_parser('dump', help='Dump contracts visible to a party')
     args = parser.parse_args()
 
     logging.basicConfig(filename=args.party + ".log", level=logging.DEBUG)
@@ -705,7 +735,10 @@ def main(argv):
         print("Create data subject record: {} {} {} {} {} {}".format(args.group_id[0], args.key_id[0], args.target, args.public_data1, args.public_data2, args.private_data))
         invitees = [string_to_party(x, party_list) for x in args.target]
         group = GroupConfig(str(args.group_id[0]))
-        asyncio.run( run_data_subject(config, run_as_party, group, str(args.key_id[0]), invitees, args.public_data1, args.public_data2, args.private_data ) )
+        asyncio.run( run_data_subject(config, run_as_party,  group, str(args.key_id[0]), invitees, args.public_data1, args.public_data2, args.private_data ) )
+    elif args.command == "dump":
+        print("Dumping all contracts in ledger")
+        asyncio.run( run_dump_contracts(config, run_as_party))
 
     exit(0)
 

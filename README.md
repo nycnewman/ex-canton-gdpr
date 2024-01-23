@@ -1,4 +1,4 @@
-#  Identity Management
+#  Sensitive Data Storage in Daml/Canton
 
 This sample demonstrates a way to distribute sensitive data using On/Off-Ledger encryption.
 
@@ -6,13 +6,13 @@ This sample demonstrates a way to distribute sensitive data using On/Off-Ledger 
 
 Various privacy and payment regulations recommend the use of encryption to protect sensitive data. Sensitive data might include PII, PHI, payment or credit card data. 
 
-Daml/Canton provides protection without encryption in the following forms:
+Out of the box, Daml/Canton provides protection without encryption in the following forms:
 
 - Native enforcement of access in the Daml data model and workflows. 
   - Parties can only see contracts for which they are stakeholders.
 - Native privacy through the partial, segmented distribution of data only to stakeholders and their participants. 
   - Canton only replicates copies of contracts to participant nodes of stakeholder parties. Other participants are unaware of the transactions or data, nor receive a copy.
-- Ability to rune the ledger to remove archived copies of data ("Right to Forget"). 
+- Ability to prune the ledger to remove archived copies of data ("Right to Forget"). 
   - Canton allows for controlled pruning of the ledger contents to purge archive contracts 
 
 In many cases, the above may be sufficient for your business use case.
@@ -34,12 +34,14 @@ This sample demonstrates:
 
 For this example, we use RSA asymmetric encryption as Key Encryption Keys (KEK) to distribute the data encryption (DEK), which we use AES256-CTR keys.
 - Each part registers a public key through Daml (where some form of validation process could ensure it is the expected party)
-- The DEK keys are then distributed by encrypting using the registered public key of each recipient
+- The DEK keys are then distributed by encrypting each key using the registered public key of each recipient
 - We have also chosen a model where the "Data Controller" controls the group of recipients "Data Sub-processors". 
-  - Other variants could be implemented, such as shared ownership mode
+  - Other variants could be implemented, such as shared ownership model
 - An owner creates an AES256 key for data encryption and for each encryption, a new IV vector is assigned for each use of the key and stored alongside the encrypted payload
+  - The choice around whether and when to use keys could be changed, i.e. one key per data blob, one key per data subject, or only one key altogether
+  - The use of a symmetric key means that any subprocessor could update the shared sensitive data. Schemes using asymmetric DEk could be used to more finely control read and write access to the data.
 
-It is important to recognise that any recipient that receives a copy of the data and the DEK key could potentially cache copies of the data locally. Therefore rotation of the 
+IMPORTANT NOTE: It is important to recognise that any recipient that receives a copy of the data and the DEK key could potentially cache copies of the data locally. Therefore, rotation of the 
 encryption keys would not be sufficient to ensure no further access to historical cached copies of data. This would need other, potentially legal or audit mechanisms, to 
 enforce proper deletion of all historical data.
 
@@ -51,7 +53,7 @@ A Data Owner (Controller) can create an IdentityGroup contract to manage a list 
   2. Data Controller can invites other parties through InviteParty choice
   3. Invited parties can accept invite by providing their public key in a Registered Identity record 
   4. Data Controller creates an EncryptionKey contract with a wrapped copy of a Data Encryption Key (DEK)
-  5. Automation distrbutes copies of the DEK to the IdentityGroup membership, wrapped with the public key of invited parties. This is stored in SharedKey records, one per IdentityGroup and invited party
+  5. Automation distributes copies of the DEK to the IdentityGroup membership, wrapped with the public key of invited parties. This is stored in SharedKey records, one per IdentityGroup and invited party
   6. Data Controller can create DataSubject records with encrypted copies of the private data. The encryption uses AES256 symmetric encryption and an IV is generated for each copy of private data
   7. Each invited party can download the DataSubject data and decrypt the data by obtaining the DEK using their private key
   8. Parties who have visibility to the DataSubject contract but are not in the IdentityGroup cannot decrypt the encrypted data set
@@ -64,8 +66,8 @@ Alternatives
 - The use of asymmetric DEK instead of symmetric might allow separation of read and write access to data
 
 TODOs
-- Code is example only and in not way fit for any for of production use (error handling, unhappy paths, audit of encryption implementation)
-- Offboarding flows are not implemented. One could add choices and automation to remove copies of shared keys for uninvited participants
+- Code is example only and in no way fit for any for of production use (error handling, unhappy paths, audit of encryption implementation)
+- Off-boarding flows are not implemented. One could add choices and automation to remove copies of shared keys for uninvited participants
 - Does not demonstrate pruning of data set
 - Whilst Daml model support variations in encryption and on/off ledger storage, only on-ledger, encrypted storage is tested
 - UI
