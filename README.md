@@ -58,6 +58,8 @@ A Data Owner (Controller) can create an IdentityGroup contract to manage a list 
   7. Each invited party can download the DataSubject data and decrypt the data by obtaining the DEK using their private key
   8. Parties who have visibility to the DataSubject contract but are not in the IdentityGroup cannot decrypt the encrypted data set
 
+![Contract Model](images/contracts.png)
+
 ## III. Alteratives / Know Issues / TODOS
 
 Alternatives
