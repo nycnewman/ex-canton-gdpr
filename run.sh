@@ -9,11 +9,17 @@ daml script --dar .daml/dist/ex-canton-gdpr-0.0.1.dar --ledger-host localhost --
 
 
 poetry run python3 bots/bots.py -p owner daemon &
+sleep 1
 poetry run python3 bots/bots.py -p identity1 daemon &
+sleep 1
 poetry run python3 bots/bots.py -p identity2 daemon &
+sleep 1
 poetry run python3 bots/bots.py -p identity3 daemon &
+sleep 1
 poetry run python3 bots/bots.py -p identity4 daemon &
+sleep 1
 poetry run python3 bots/bots.py -p identity5 daemon &
+sleep 1
 
 poetry run python3 bots/bots.py -p owner group 123456789
 

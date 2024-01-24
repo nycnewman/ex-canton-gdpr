@@ -136,7 +136,7 @@ def create_rsa_key(owner: str):
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
 
-        public_base64 = (base64.b64encode(public_pem)).decode()
+        public_base64 = (base64.b64encode(public_pem)) #.decode()
 
         digest = hashes.Hash(hashes.SHA256())
         digest.update(public_base64)
@@ -334,11 +334,11 @@ async def invite_party(config, owner:PartyConfig, group: GroupConfig, invitee:Pa
         print(e)
 
 @log_cancellation
-async def dump_contracts(config, party):
+async def dump_contracts(config, party, offset_value: str):
     while True:
         events = []
         async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
-            async with conn.stream("*", offset='000000000000000000') as stream:
+            async with conn.stream("*", offset=offset_value) as stream:
                 async for event in stream:
                     try: 
                         print(event)
@@ -623,8 +623,8 @@ async def run_dek_key(config : Config, identity: PartyConfig, group: GroupConfig
 async def run_data_subject(config : Config, identity: PartyConfig, group: GroupConfig, encryption_key_id: str, invitees: [PartyConfig], public_data1: str, public_data2: str, private_data: str):
     await create_data_subject(config, identity, group, encryption_key_id, invitees, public_data1, public_data2, private_data)
 
-async def run_dump_contracts(config : Config, identity: PartyConfig):
-    await dump_contracts(config, identity)
+async def run_dump_contracts(config : Config, identity: PartyConfig, offset:str):
+    await dump_contracts(config, identity, offset)
 
 def string_to_party(party_name: str, parties: [PartyConfig]):
     found = None
@@ -647,9 +647,9 @@ async def test_party(config: Config):
 
 def main(argv):
 
-    config = Config("http://localhost:6865")
-    asyncio.run( test_party(config ) )
-    exit(1)
+    #config = Config("http://localhost:6865")
+    #asyncio.run( test_party(config ) )
+    #exit(1)
 
     # Load parties from parties.json (output of a Daml Script)
     parties = None
@@ -675,6 +675,9 @@ def main(argv):
     identity5 = PartyConfig("identity5", parties.identity5, create_rsa_key("identity5"))
     party_list = [owner, identity1, identity2, identity3, identity4, identity5]
 
+    # default value for offset
+    offset='000000000000000000'
+
     parser = argparse.ArgumentParser(description='ex-canton-gdpr')
     parser.add_argument('--url', default="http://localhost:6865", help='URL of ledger (defaults to http://localhost:6865')
     parser.add_argument('-p', '--party', choices=party_names, help='Select which party is being running these commands')
@@ -696,6 +699,7 @@ def main(argv):
     subject.add_argument('public_data2', nargs=1,  type=str, help='public_data2')
     subject.add_argument('private_data', nargs=1,  type=str, help='private data (e.g. json)')
     dump_contracts = subparser.add_parser('dump', help='Dump contracts visible to a party')
+    dump_contracts.add_argument('--offset', nargs=1,  type=str, help='ledger offset', required=False)
     args = parser.parse_args()
 
     logging.basicConfig(filename=args.party + ".log", level=logging.DEBUG)
@@ -737,8 +741,10 @@ def main(argv):
         group = GroupConfig(str(args.group_id[0]))
         asyncio.run( run_data_subject(config, run_as_party,  group, str(args.key_id[0]), invitees, args.public_data1, args.public_data2, args.private_data ) )
     elif args.command == "dump":
-        print("Dumping all contracts in ledger")
-        asyncio.run( run_dump_contracts(config, run_as_party))
+        if args.offset != []:
+           offset = args.offset[0]
+        print("Dumping all contracts in ledger from offset: {}".format(offset))
+        asyncio.run( run_dump_contracts(config, run_as_party, offset))
 
     exit(0)
 

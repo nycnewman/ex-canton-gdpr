@@ -1,0 +1,6 @@
+participant1.domains.connect("domain", "http://localhost:5018")
+participant2.domains.connect("domain", "http://localhost:5018")
+
+
+participant1.pruning.set_schedule("2 * * * * ?", 1.minute, 5.minutes)
+participant2.pruning.set_schedule("2 * * * * ?", 1.minute, 5.minutes)
