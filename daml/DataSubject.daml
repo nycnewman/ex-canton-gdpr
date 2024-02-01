@@ -1,0 +1,84 @@
+module DataSubject where
+
+import IdentityManagement
+import DA.List as L
+
+template WrappedKey 
+  with
+    owner : Party
+    recipient : Party
+    keyId : KeyId
+    wrappedKey: Text
+    agreementContractCid : Optional (ContractId DataProcessorAgreement)
+
+  where
+    signatory owner
+    observer recipient
+
+data SubjectId = SubjectId Text 
+  deriving (Eq, Show)
+
+template DataSubject with
+    subjectId: SubjectId
+    dataController: Party
+    dataProcessors: [Party]
+  where
+    signatory dataController
+    observer dataProcessors
+
+    nonconsuming choice RequestDataSubjectErasure : ContractId DataSubjectErasureRequest with
+        subjectId : SubjectId
+
+      controller dataController
+
+      do
+        create DataSubjectErasureRequest with
+          subjectId
+          dataController
+          dataProcessors
+
+template DataSubjectData with
+    subjectId: SubjectId
+    dataController: Party
+    dataProcessors: [Party]
+    publicData1: Text
+    publicData2: Text
+    privateData: Optional PrivateData
+  where
+    signatory dataController
+    observer dataProcessors
+
+template DataSubjectErasureRequest with
+    subjectId: SubjectId
+    dataController: Party
+    dataProcessors: [Party]
+
+  where
+    signatory dataController
+    observer dataProcessors
+
+    choice Acknowledge : Optional (ContractId DataSubjectErasureRequest) with
+        processor : Party
+    
+      controller processor
+      do
+        let
+          remaining = filter (/=processor) dataProcessors
+        create DataSubjectErasureAcknowledgement with
+          subjectId
+          dataController
+          dataProcessor = processor
+        if (L.length remaining) > 0 then do 
+          contract <- create this with 
+            dataProcessors = remaining
+          return (Some contract)
+        else do
+          return None
+
+template DataSubjectErasureAcknowledgement with
+    subjectId: SubjectId
+    dataController: Party
+    dataProcessor: Party
+  where
+    signatory dataController
+    observer dataProcessor

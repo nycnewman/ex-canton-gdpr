@@ -128,7 +128,7 @@ options:
 
 ## V. Testing of Pruning
 
-This demonstrates how to configure pruning in Canton. Note however that these settings are not viable for produciton as it would
+This demonstrates how to configure pruning in Canton. Note however that these settings are not viable for production as it would
 have a significant impact on performance of the system
 
 - Depends on Docker to run Postgres instance

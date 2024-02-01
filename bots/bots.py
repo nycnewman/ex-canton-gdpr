@@ -4,13 +4,16 @@ import random
 import string
 import json
 import argparse
-
-import dazl
-
 import pprint
 import os
 import sys
 import base64
+import traceback
+import pprint
+
+import dazl
+from dazl.ledgerutil import ACS
+
 from dataclasses import dataclass, fields
 from dataclasses_json import dataclass_json
 from typing import List
@@ -20,10 +23,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-@dataclass
-class Config:
-    url: str
 
 @dataclass_json
 @dataclass
@@ -57,10 +56,6 @@ class PartyConfig:
     party: str # Party ID on ledger
     rsa_key: RSAKey # RSA key for user
 
-@dataclass
-class GroupConfig:
-    id: str
-
 @dataclass_json
 @dataclass
 class Parties:
@@ -71,6 +66,11 @@ class Parties:
     identity4: str
     identity5: str
 
+@dataclass
+class Config:
+    url: str
+    party_list: [PartyConfig]
+
 def log_cancellation(f):
     async def wrapper(*args, **kwargs):
         try:
@@ -80,6 +80,12 @@ def log_cancellation(f):
             print("Error thrown: {}".format(e))
             raise
     return wrapper
+
+def log_message(stack, exception):
+    logging.debug(stack)
+    logging.debug(exception)
+    print("ERROR: {}. {}".format(exception, stack))
+    exit(1)
 
 def add_to_16(value):
     while len(value) % 16 != 0:
@@ -194,12 +200,8 @@ def unwrap_dek_key(private_key: str, wrapped_key: str):
 
         return( plaintext_key )
     except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno)
-            logging.debug(e)
-            print(e)
-            return( None )
+        log_message(traceback.format_exc(), e)
+        return( None )
 
 def encrypt_data_payload(encryption_key: str, original_data: str):
     try: 
@@ -216,11 +218,7 @@ def encrypt_data_payload(encryption_key: str, original_data: str):
         
         return( (iv_base64, encrypted_data) )
     except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
+        log_message(traceback.format_exc(), e)
 
 def unencrypt_data_payload(plaintext_key, private_data):
     try: 
@@ -233,115 +231,66 @@ def unencrypt_data_payload(plaintext_key, private_data):
         cleartext_data = json.loads(original_text)
         return( cleartext_data )
     except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
+        log_message(traceback.format_exc(), e)
 
 @log_cancellation
-async def setup_group(config: Config, owner: PartyConfig, group : GroupConfig):
-
-    try:
-        async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
-            found = False
-            group_contract = None
-            async with conn.query("IdentityManagement:IdentityGroup") as stream:
-                async for event in stream.creates():
-                    logging.debug(event.contract_id)
-                    logging.debug(event.payload)
-                    if (event.payload["owner"] == owner.party) and (event.payload["id"] == group.id):
-                        found = True
-                        group_contract = event
-                    
-            if (found == False):
-                logging.debug("Registering Identity Group")
-                print("Creating Group: {}".format(group.id))
-                contract = { 'owner' : owner.party, 'id' : group.id, 'members' : "" }
-                result = await conn.create('IdentityManagement:IdentityGroup', contract)
-                logging.debug("Create result: {}".format(result))
-                group_contract = result
-            logging.debug("Group Contract: {}".format(group_contract))
-
-            await conn.close()
-
-    except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
-
-@log_cancellation
-async def validate_registration(config: Config, party : PartyConfig):
+async def validate_proposals(config: Config, party : PartyConfig):
     while True:
         try: 
-            group_contracts = {}
-            registrations = []
+            proposal_contracts = []
             async with dazl.connect(url=config.url, act_as=dazl.Party(party.party), read_as=dazl.Party(party.party)) as conn:
-                async with conn.query("IdentityManagement:IdentityGroup") as stream:
+                async with conn.query("IdentityManagement:DataProcessorProposal") as stream:
                     async for event in stream.creates():
-                        group_contracts[event.payload['id']] = event
+                        proposal_contracts.append(event)
 
-                async with conn.query("IdentityManagement:RegisteredIdentity") as stream:
-                    async for event in stream.creates():
-                        registrations.append(event.payload['groupId'])
+                for proposal in proposal_contracts:
+                    if proposal.payload['dataProcessor'] != party.party:
+                        continue
 
+                    print("Validating subprocessor proposal")
+                    print("NOTE: This should have a check that provided key makes sense and is valid")
+                    result = await conn.exercise(proposal.contract_id, "AcceptAndRegister", { "processorPublicKey" : { "publicKey" : party.rsa_key.public_base64, "fingerprint" : party.rsa_key.public_fingerprint } } )
+                    logging.debug("Proposal Response: {}".format(result))
+                    print("Proposal Response: {}".format(result))
 
-                for groupId in group_contracts:
-                    #if party.party == group_contracts[groupId].payload["owner"]:
-                    #    # Ignore owner of group
-                    #    continue
-
-                    if groupId not in registrations:
-                        # register a RegisteredIdentity record
-                        logging.debug("Registering Public Key")
-                        print("Registering Public Key: {}".format(party.party))
-                        contract = { "member": party.party, "publicKey" : { "publicKey" : party.rsa_key.public_base64, "fingerprint" : party.rsa_key.public_fingerprint} } 
-                        try:
-                            print("Group Details: {}".format(group_contracts[groupId]))
-                            result = await conn.exercise(group_contracts[groupId].contract_id, "RegisterPublicKey", contract )
-                            print(result)
-                        except Exception as e:
-                            logging.debug(e)
-                            print("ERROR: Validate exception: {} {}".format(party.party, e))
                 await conn.close()
             await asyncio.sleep(2)
         except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno)
-            logging.debug(e)
-            print(e)
+            log_message(traceback.format_exc(), e)
 
 @log_cancellation
-async def invite_party(config, owner:PartyConfig, group: GroupConfig, invitee:PartyConfig):
-
-    try:
-        async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
-            print("Inviting party: {}".format(invitee.party))
-            result = await conn.exercise_by_key("IdentityManagement:IdentityGroup", "InviteNewMember", {"_1": owner.party, "_2": group.id}, { "invitee": invitee.party } )
-            logging.debug("Invite Response: {}".format(result))
-            print("Invite Response: {}".format(result))
-
-            await conn.close()
-
-    except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
-
-@log_cancellation
-async def dump_contracts(config, party, offset_value: str):
+async def validate_processor(config: Config, party : PartyConfig):
     while True:
-        events = []
+        try: 
+            proposal_contracts = []
+            async with dazl.connect(url=config.url, act_as=dazl.Party(party.party), read_as=dazl.Party(party.party)) as conn:
+                async with conn.query("IdentityManagement:DataProcessorValidation") as stream:
+                    async for event in stream.creates():
+                        proposal_contracts.append(event)
+
+                for proposal in proposal_contracts:
+                    if proposal.payload['dataController'] != party.party:
+                        continue
+                
+                    print("Validating subprocessor identity")
+                    print("NOTE: This should have a check that provided key makes sense and is valid")
+                    result = await conn.exercise(proposal.contract_id, "Validate" )
+                    logging.debug("Validation Response: {}".format(result))
+                    print("Validation Response: {}".format(result))
+
+                await conn.close()
+            await asyncio.sleep(2)
+        except Exception as e:
+            log_message(traceback.format_exc(), e)
+
+@log_cancellation
+async def dump_contracts(config, party):
+    while True:
         async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
-            async with conn.stream("*", offset=offset_value) as stream:
+            async with conn.stream("*") as stream:
                 async for event in stream:
                     try: 
-                        print(event)
+                        #print(event)
                         if isinstance(event, (dazl.ledger.CreateEvent)):
                             print("Dump: Create {} {}".format(event.contract_id, event.payload))
                         elif isinstance(event, dazl.ledger.ArchiveEvent):
@@ -349,78 +298,63 @@ async def dump_contracts(config, party, offset_value: str):
                         elif isinstance(event, dazl.ledger.Boundary):
                             print("Dump: Boundary {}".format(event.offset))
                     except Exception as e:
-                        exc_type, exc_obj, exc_tb = sys.exc_info()
-                        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                        print(exc_type, fname, exc_tb.tb_lineno)
-                        logging.debug(e)
-                        print(e)
+                        log_message(traceback.format_exc(), e)
+            await asyncio.sleep(10)
 
 @log_cancellation
-async def register_key(config:Config, owner: PartyConfig, group: GroupConfig, key: WrappedEncryptionKey):
-
-    try:    
-        async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
-            print("Registering encryption key")
-            contract = { 'owner' : owner.party, 'groupId': group.id, 'id' : key.id, 'wrappedKey' : key.wrapped_base64 }
-            try:
-                result = await conn.create('IdentityManagement:EncryptionKey', contract)
-                print(result)
-            except Exception as e:
-                logging.debug(e)
-                print(e)
-            await conn.close()
-    except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
+async def dump_contracts_offset(config, party, offset_value: str):
+    while True:
+        async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
+            async with conn.stream("*", offset=offset_value) as stream:
+                async for event in stream:
+                    try: 
+                        #print(event)
+                        if isinstance(event, (dazl.ledger.CreateEvent)):
+                            print("Dump: Create {} {}".format(event.contract_id, event.payload))
+                        elif isinstance(event, dazl.ledger.ArchiveEvent):
+                            print("Dump: Archive {}".format(event.contract_id))
+                        elif isinstance(event, dazl.ledger.Boundary):
+                            print("Dump: Boundary {}".format(event.offset))
+                    except Exception as e:
+                        log_message(traceback.format_exc(), e)
+            await asyncio.sleep(10)
 
 @log_cancellation
 async def distribute_keys(config: Config, party : PartyConfig):
     while True:
         async with dazl.connect(url=config.url, act_as=dazl.Party(party.party), read_as=dazl.Party(party.party)) as conn:
             try:
-                group_contracts = {}
-                async with conn.query("IdentityManagement:IdentityGroup") as stream:
+                agreement_contracts = {}
+                async with conn.query("IdentityManagement:DataProcessorAgreement") as stream:
                     async for event in stream.creates():
-                        #group_array = group_contracts.get(event.payload['id'], [])
-                        #group_array.append(event)
-                        group_contracts[event.payload['id']] = event
-
-                encryption_keys = {}
-                async with conn.query("IdentityManagement:EncryptionKey") as stream:
-                    async for event in stream.creates():
-                        key_array = encryption_keys.get(event.payload['groupId'], [])
-                        key_array.append(event)
-                        encryption_keys[event.payload['groupId']] = key_array
-
-                identities = {}
-                async with conn.query("IdentityManagement:RegisteredIdentity") as stream:
-                    async for event in stream.creates():
-                        group_identities = identities.get(event.payload['groupId'], {})
-                        group_identities[event.payload["identity"]] = event
-                        identities[event.payload['groupId']] = group_identities
+                        if event.payload['dataController'] == party.party:
+                            agreement_contracts[event.payload['dataProcessor']] = event
 
                 distributed_keys = {}
-                async with conn.query("IdentityManagement:SharedKey") as stream:
+                async with conn.query("DataSubject:WrappedKey") as stream:
                     async for event in stream.creates():
-                        shared_key_id = event.payload["id"]
-                        group_id = event.payload['groupId']
-                        recipient = event.payload["recipient"]
+                        if event.payload['owner'] == party.party:
+                            key_id = event.payload["keyId"]['KeyId']
+                            agreement_id = event.payload['agreementContractCid']
+                            recipient_id = event.payload['recipient']
 
-                        key_array = distributed_keys.get(group_id, {})
-                        key_array[shared_key_id] = key_array.get(shared_key_id, [])
-                        key_array[shared_key_id].append(event)
-                        distributed_keys[group_id] = key_array
+                            if agreement_id == None:
+                                agreement_id = "primary"
+                            key_array = distributed_keys.get(key_id, {})
+                            key_array[agreement_id] = event
+                            distributed_keys[key_id] = key_array
 
-                for groupId in group_contracts:
-                    expected_members = group_contracts[groupId].payload["members"]
-
-                    # Get real DEK
-                    for key_contract in encryption_keys.get(groupId, []):
+                for key_id in distributed_keys:
+                    # check if primary still exists:
+                    if distributed_keys[key_id].get('primary', None) == None:
+                        # we need to delete shared copies as 
+                        for tmpkey in distributed_keys[key_id]:
+                            result = await conn.archive(distributed_keys[key_id][tmpkey].contract_id)
+                            print(result)
+                    else:
+                        # Get real DEK
+                        key_contract = distributed_keys[key_id]['primary']
                         contract_id = key_contract.contract_id
-                        key_id = key_contract.payload['id']
                         wrapped_key = key_contract.payload['wrappedKey']
 
                         plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
@@ -429,81 +363,78 @@ async def distribute_keys(config: Config, party : PartyConfig):
                             print("distribute_keys: Decryption failed - check keys ({})".format(party.party))
                             continue
 
-                        current_shared = []
-                        if distributed_keys.get(groupId, []) != []:
-                            # No keys distributed so far
-                            if distributed_keys[groupId].get(key_id, []) != []:
-                                for key in distributed_keys[groupId][key_id]:
-                                    current_shared.append(key.payload["recipient"])
+                        for member in agreement_contracts:
+                            agreement_contract = agreement_contracts[member]
+                            if distributed_keys[key_id].get(agreement_contract.contract_id, None) == None:
+                                identity_public_key = base64.b64decode(agreement_contract.payload['processorPublicKey']['publicKey'])
 
-                        missing_members = [x for x in expected_members if x not in current_shared]
+                                public_key = serialization.load_pem_public_key(
+                                    identity_public_key
+                                )
+        
+                                wrapped_key_base64 = wrap_dek_key(public_key, plaintext_key)
 
-                        for member in missing_members:
-                            # check that member has registered a public key
-                            group_identities = identities.get(groupId)
-                            registered_identity = None
-                            identity_public_key = None
-
-                            if group_identities != None:
-                                registered_identity = identities[groupId].get(member, None)
-                            else:
-                                continue
-
-                            if registered_identity != None:
-                                tmp_public_key = registered_identity.payload["publicKey"]
-                                tmp_public_key = tmp_public_key["publicKey"]
-                                identity_public_key = base64.b64decode(tmp_public_key)
-                            else:
-                                continue
-
-                            public_key = serialization.load_pem_public_key(
-                                identity_public_key
-                            )
-    
-                            wrapped_key_base64 = wrap_dek_key(public_key, plaintext_key)
-
-                            logging.debug("Distributing a key to: {}".format(member))
-                            print("Distributing a Key to : {}".format(member))
-                            print("{} {} {} {}".format(party.party, member, groupId, key_id ))
-                            contract = { 'owner' : party.party, 'recipient': member, 'groupId': groupId, 'id' : key_id, 'wrappedKey' : wrapped_key_base64 }
-                            result = await conn.create('IdentityManagement:SharedKey', contract)
-                            print(result)
+                                logging.debug("Distributing a key to: {}".format(member))
+                                print("Distributing a Key to : {}".format(member))
+                                print("{} {} {} ".format(party.party, member, key_id ))
+                                contract = { 'owner' : party.party, 'recipient': member, 'keyId' : {'KeyId' : key_id}, 'wrappedKey' : wrapped_key_base64, "agreementContractCid": agreement_contract.contract_id }
+                                result = await conn.create('DataSubject:WrappedKey', contract)
+                                print(result)
 
             except Exception as e:
-                exc_type, exc_obj, exc_tb = sys.exc_info()
-                fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                print(exc_type, fname, exc_tb.tb_lineno)
-                logging.debug(e)
-                print(e)
+                log_message(traceback.format_exc(), e)
 
             await conn.close()
         await asyncio.sleep(2)
 
 @log_cancellation
-async def create_data_subject(config: Config, owner: PartyConfig, group: GroupConfig, key_id: str, subprocessors: [PartyConfig], public_data1: str, public_data2: str, private_data: str ):
+async def create_data_subject(config: Config, owner: PartyConfig, subject_id: str):
+    try:
+        async with dazl.connect(url=config.url, read_as=dazl.Party(owner.party)) as conn:
+            agreement_contracts = []
+            async with conn.query("IdentityManagement:DataProcessorAgreement") as stream:
+                async for event in stream.creates():
+                    if event.payload['dataController'] == owner.party:
+                        agreement_contracts.append(event)
+
+        processors_ids = [x.payload['dataProcessor'] for x in agreement_contracts]
+
+        contract = { 
+            'dataController' : owner.party, 
+            'subjectId' : { 'SubjectId': subject_id},
+            'dataProcessors' : processors_ids
+        }
+        async with dazl.connect(url=config.url, act_as=owner.party) as conn:
+            result = await conn.create('DataSubject:DataSubject', contract)
+            print("Data Subject: {}".format(result))
+
+    except Exception as e:
+        log_message(traceback.format_exc(), e)
+
+@log_cancellation
+async def create_data_subject_data(config: Config, owner: PartyConfig, subject_id: str, key_id: str, subprocessors: [PartyConfig], public_data1: str, public_data2: str, private_data: str ):
     try:
         encryption_keys = {}
         async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
-            async with conn.query("IdentityManagement:EncryptionKey") as stream:
+            async with conn.query("DataSubject:WrappedKey") as stream:
                 async for event in stream.creates():
-                    key_array = encryption_keys.get(event.payload['groupId'], [])
-                    key_array.append(event)
-                    encryption_keys[event.payload['groupId']] = key_array
+                    if event.payload['owner'] == owner.party:
+                        key_array = encryption_keys.get(event.payload['keyId']['KeyId'], [])
+                        key_array.append(event)
+                        encryption_keys[event.payload['keyId']['KeyId']] = key_array
 
         plaintext_key = None
-        for key_contract in encryption_keys.get(group.id, []):
-            print(key_contract.payload)
+        for key_contract in encryption_keys.get(key_id, []):
+            #print(key_contract.payload)
             contract_id = key_contract.contract_id
-            found_key_id = key_contract.payload['id']
+            agreement_id = key_contract.payload['agreementContractCid']
             wrapped_key = key_contract.payload['wrappedKey']
-            if found_key_id == key_id:
+            if agreement_id == None:
                 plaintext_key = unwrap_dek_key(owner.rsa_key.private_key, wrapped_key)
 
         if plaintext_key == None:
-            print("ERROR: Not able to retrieve encryption key")
+            print("ERROR: Not able to retrieve encryption key: {}".format(key_id))
             exit(1)
-
-        data_subject_id = ''.join(random.choices(string.digits + string.digits, k = 10))
 
         (iv, encrypted_data) = encrypt_data_payload(plaintext_key, private_data)
 
@@ -511,8 +442,7 @@ async def create_data_subject(config: Config, owner: PartyConfig, group: GroupCo
             "OnLedger" : {
                 'encryption' : {
                     'EncAES256': {
-                        'keyId' : key_id,
-                        'groupId' : group.id,
+                        'keyId' : {'KeyId': key_id},
                         'iv' : iv
                     }
                 },
@@ -523,108 +453,219 @@ async def create_data_subject(config: Config, owner: PartyConfig, group: GroupCo
         subprocessors_ids = [x.party for x in subprocessors]
 
         contract = { 
-            'owner' : owner.party, 
-            'id' : data_subject_id, 
+            'dataController' : owner.party, 
+            'subjectId' : { 'SubjectId': subject_id},
             'publicData1' : public_data1,
             'publicData2' : public_data2,
             'privateData' : private_data,
-            'subprocessors' : subprocessors_ids 
+            'dataProcessors' : subprocessors_ids 
         }
-
+        #print(contract)
         async with dazl.connect(url=config.url, act_as=owner.party) as conn:
-            result = await conn.create('IdentityManagement:DataSubject', contract)
-            print("Data Subject: {}".format(result))
+            result = await conn.create('DataSubject:DataSubjectData', contract)
+            print("DataSubjectData: {}".format(result))
 
     except Exception as e:
-        exc_type, exc_obj, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno)
-        logging.debug(e)
-        print(e)
+        log_message(traceback.format_exc(), e)
 
 @log_cancellation
 async def dump_data_subjects(config: Config, party: PartyConfig):
     while True:
         try: 
             async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
-                contracts = {}
-                async with conn.query("IdentityManagement:DataSubject") as stream:
+                agreement_contracts = {}
+                async with conn.query("IdentityManagement:DataProcessorAgreement") as stream:
                     async for event in stream.creates():
-                        contracts[event.contract_id] = event.payload
+                        #if event.payload['dataProcessor'] == party.party:
+                        agreement_contracts[event.contract_id] = event
 
-                distributed_keys = {}
-                async with conn.query("IdentityManagement:SharedKey") as stream:
+                data_subjects = {}
+                async with conn.query("DataSubject:DataSubject") as stream:
                     async for event in stream.creates():
-                        key_array = distributed_keys.get(str(event.payload['groupId']), {})
-                        key_array[str(event.payload["id"])] = event
-                        distributed_keys[event.payload['groupId']] = key_array
+                        data_subjects[event.contract_id] = event.payload
+
+                data_subject_data = {}
+                async with conn.query("DataSubject:DataSubjectData") as stream:
+                    async for event in stream.creates():
+                        data_array = data_subject_data.get(event.payload['subjectId']['SubjectId'], [])
+                        data_array.append(event.payload)
+                        data_subject_data[event.payload['subjectId']['SubjectId']] = data_array
+
+                encryption_keys = {}
+                async with conn.query("DataSubject:WrappedKey") as stream:
+                    async for event in stream.creates():
+                        key_array = encryption_keys.get(event.payload['keyId']['KeyId'], {})
+                        agreement_id = event.payload['agreementContractCid']
+                        if agreement_id == None:
+                            agreement_id = 'primary'
+                        key_array[agreement_id] = event
+                        encryption_keys[event.payload['keyId']['KeyId']] = key_array
                 
-                for contract in contracts:
-                    privateData = None
-                    if contracts[contract]['privateData'].get('OnLedger', None) != None:
-                        group_id = str(contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['groupId'])
-                        enc_key_id = str(contracts[contract]['privateData']['OnLedger']['encryption']['EncAES256']['keyId'])
-                        
+                for contract in data_subjects:
+                    subject_id = data_subjects[contract]['subjectId']['SubjectId']
+                    print("==========")
+                    print("Data Subject: {}".format(subject_id))
 
-                        if distributed_keys.get(group_id, None) == None:
-                            print("DDS: No key available to decrypt contract (1) ({})".format(party.party))
-                            print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
-                            continue
+                    if data_subject_data.get(subject_id, None) == None:
+                        # no data contracts
+                        continue
+                    
+                    for data_contract in data_subject_data[subject_id]:
+                        privateData = None
 
-                        if distributed_keys[group_id].get(enc_key_id, None) != None:
-                            key_contract = distributed_keys[group_id][enc_key_id]
-                            wrapped_key = key_contract.payload['wrappedKey']
+                        if data_contract['privateData'].get('OnLedger', None) != None:
+                            enc_key_id = str(data_contract['privateData']['OnLedger']['encryption']['EncAES256']['keyId']['KeyId'])
+
+                            if encryption_keys.get(enc_key_id, None) == None:
+                                print("DDS: No key available to decrypt contract (1) ({})".format(party.party))
+                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['id'], 
+                                    data_subject_data[data_contract]['publicData1'], data_contract['publicData2'], "<ERROR> Decrypting data"))
+                                continue
+
+                            for agreement in encryption_keys[enc_key_id]:
+                                if data_contract['dataController'] == party.party:
+                                    # party is data controller so has no agreement
+                                    key_contract = encryption_keys[enc_key_id]['primary']
+                                    wrapped_key = key_contract.payload['wrappedKey']
+                                else:
+                                    # party is a subprocessor so need to match to agreement
+                                    key_contract = encryption_keys[enc_key_id][agreement]
+                                    wrapped_key = key_contract.payload['wrappedKey']
                             
                             plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
 
                             if plaintext_key == None:
                                 print("DDS: Decryption of key not possible (2) ({})".format(party.party))
                                 privateData = None
-                                print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
+                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
+                                    data_contract['publicData1'], data_contract['publicData2'], privateData))
                                 continue
                             else:
-                                privateData = unencrypt_data_payload(plaintext_key, contracts[contract]['privateData'])
-                                #print(privateData)
-                                print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
+                                privateData = unencrypt_data_payload(plaintext_key, data_contract['privateData'])
+                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
+                                    data_contract['publicData1'], data_contract['publicData2'], privateData))
                         else:
-                            print("DDS: No key available to decrypt contract (3) ({})".format(party.party))
-                            print("Data Subject: {} | {} | {} | {} | {}".format(party.party, contracts[contract]['id'], contracts[contract]['publicData1'], contracts[contract]['publicData2'], privateData))
+                            print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], data_contract['publicData1'], 
+                                data_contract['publicData2'], '<None>'))
 
                 await conn.close()
             await asyncio.sleep(5)
         except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno)
-            logging.debug(e)
-            print(e)
+            log_message(traceback.format_exc(), e)
             print("DDS: Exiting: {}".format(party.party))
 
 async def run_automation(config : Config, identity: PartyConfig):
 
-    task1 = asyncio.create_task(validate_registration(config, identity))
-    task2 = asyncio.create_task(dump_data_subjects(config, identity))
-    task3 = asyncio.create_task(distribute_keys(config, identity))
+    task1 = asyncio.create_task(validate_proposals(config, identity))
+    task2 = asyncio.create_task(validate_processor(config, identity))
+    task3 = asyncio.create_task(dump_data_subjects(config, identity))
+    task4 = asyncio.create_task(distribute_keys(config, identity))
+    #task4 = asyncio.create_task(dump_contracts(config, identity))
     
-    await asyncio.gather(task1, task2, task3)
+    await asyncio.gather(task1, task2, task3, task4)
 
-async def run_group(config : Config, identity: PartyConfig, group: GroupConfig):
-    await setup_group(config, identity, group)
+async def create_master(config : Config, identity: PartyConfig):
+    try:
+        async with dazl.connect(url=config.url, act_as=dazl.Party(identity.party), read_as=dazl.Party(identity.party)) as conn:
+            found = False
+            master_contract = None
+            async with conn.query("IdentityManagement:DataControllerMaster") as stream:
+                async for event in stream.creates():
+                    logging.debug(event.contract_id)
+                    logging.debug(event.payload)
+                    if (event.payload["owner"] == owner.party):
+                        found = True
+                        master_contract = event
+                    
+            if (found == False):
+                logging.debug("Registering Data Controller Master")
+                print("Creating master contract: ")
+                contract = { 'dataController' : identity.party }
+                result = await conn.create('IdentityManagement:DataControllerMaster', contract)
+                logging.debug("Create result: {}".format(result))
+                group_contract = result
+            logging.debug("Master Contract: {}".format(master_contract))
 
-async def run_invite(config : Config, identity: PartyConfig, group: GroupConfig, invitee: PartyConfig):
-    await invite_party(config, identity, group, invitee)
+            await conn.close()
 
+    except Exception as e:
+        log_message(traceback.format_exc(), e)
 
-async def run_dek_key(config : Config, identity: PartyConfig, group: GroupConfig, key_id: str):
+@log_cancellation
+async def invite_processor(config : Config, identity: PartyConfig, invitees: [PartyConfig]):
+    try:
+        async with dazl.connect(url=config.url, act_as=dazl.Party(identity.party), read_as=dazl.Party(identity.party)) as conn:
+            found = False
+            master_contract = None
+            async with conn.query("IdentityManagement:DataControllerMaster") as stream:
+                async for event in stream.creates():
+                    logging.debug(event.contract_id)
+                    logging.debug(event.payload)
+                    if (event.payload["dataController"] == identity.party):
+                        found = True
+                        master_contract = event
+                    
+            if (found == False):
+                print("No master contract found for party")
+                return
+
+            for invitee in invitees:
+                target = string_to_party(invitee, config.party_list)
+                if target == None:
+                    print("ERROR: Bad invitee")
+                    exit(1)
+                
+                print("Inviting processor party: {}".format(target.name))
+                params = { "dataProcessor": target.party, "controllerPublicKey" : { "publicKey" : target.rsa_key.public_base64, "fingerprint" : target.rsa_key.public_fingerprint }}
+                result = await conn.exercise( master_contract.contract_id, "InviteDataProcessor", params )
+                logging.debug("Invite Response: {}".format(result))
+                print("Invite Response: {}".format(result))
+
+            await conn.close()
+
+    except Exception as e:
+        log_message(traceback.format_exc(), e)
+
+async def register_dek_key(config : Config, identity: PartyConfig, key_id: str):
     encryption_key = create_dek_key(key_id)
     wrapped_key = WrappedEncryptionKey(encryption_key.id, wrap_dek_key(identity.rsa_key.public_key, encryption_key.key))
-    await register_key(config, identity, group, wrapped_key)
+    try:    
+        async with dazl.connect(url=config.url, act_as=dazl.Party(identity.party), read_as=dazl.Party(identity.party)) as conn:
+            print("Registering encryption key")
+            contract = { 'owner' : identity.party, 'recipient' : identity.party, 'keyId' : {'KeyId': key_id}, 
+             'wrappedKey' : wrapped_key.wrapped_base64, "agreementContractCid" : None }
+            try:
+                result = await conn.create('DataSubject:WrappedKey', contract)
+                print(result)
+            except Exception as e:
+                log_message(traceback.format_exc(), e)
+            await conn.close()
+    except Exception as e:
+        log_message(traceback.format_exc(), e)
 
-async def run_data_subject(config : Config, identity: PartyConfig, group: GroupConfig, encryption_key_id: str, invitees: [PartyConfig], public_data1: str, public_data2: str, private_data: str):
-    await create_data_subject(config, identity, group, encryption_key_id, invitees, public_data1, public_data2, private_data)
+# Dummy function to test and evaluate various DAZL features
+async def run_test(config : Config, party: PartyConfig):
+        try: 
+            async with dazl.connect(url=config.url, read_as=dazl.Party(party.party)) as conn:
+                offset = await conn.get_ledger_end()
+                print( offset ) 
+                async with ACS(conn, ["IdentityManagement:DataSubject", "IdentityManagement:WrappedKey"]) as acs:
+                    acs = await acs.read()
 
-async def run_dump_contracts(config : Config, identity: PartyConfig, offset:str):
-    await dump_contracts(config, identity, offset)
+                print(acs.offset)
+                print(len(acs.contracts))
+                for contract in acs.matching_contracts("IdentityManagement:WrappedKey"):
+                    print(contract.value)
+                    print(contract.value_type)
+                    print(acs.contracts[contract])
+                    print("")
+                    
+                #print(acs.earliest_contract("*"))
+
+                await conn.close()
+        except Exception as e:
+            log_message(traceback.format_exc(), e)
+            print("DDS: Exiting: {}".format(party.party))
 
 def string_to_party(party_name: str, parties: [PartyConfig]):
     found = None
@@ -683,23 +724,23 @@ def main(argv):
     parser.add_argument('-p', '--party', choices=party_names, help='Select which party is being running these commands')
     subparser = parser.add_subparsers(dest='command')
     daemon = subparser.add_parser('daemon', help='run automation for identity')
+    master = subparser.add_parser('master',help='Create master contract')
     invite = subparser.add_parser('invite', help='Invite a party to a group')
-    invite.add_argument('--group_id', type=int, help='Provided group id', required=True)
     invite.add_argument('--target', action="append", choices=party_names, help='Invite a party to a group', required=True)
-    group = subparser.add_parser('group',help='Create group with provided id')
-    group.add_argument('group_id', nargs=1,  type=int, help='Create group with provided id')
     encryption = subparser.add_parser('create_encryption', help='Create a new DEK encryption key with id')
-    encryption.add_argument('group_id', nargs=1,  type=int, help='id for group')
-    encryption.add_argument('id', nargs=1,  type=int, help='id for key')
+    encryption.add_argument('key_id', nargs=1,  type=str, help='id for key')
     subject = subparser.add_parser('create_subject', help='Create a new data subject record')
-    subject.add_argument('--target', action="append", choices=party_names, help='Part(ies) to share a subject record', required=True)
-    subject.add_argument('group_id', nargs=1,  type=int, help='id for group')
-    subject.add_argument('key_id', nargs=1,  type=int, help='id for key')
-    subject.add_argument('public_data1', nargs=1,  type=str, help='public_data1')
-    subject.add_argument('public_data2', nargs=1,  type=str, help='public_data2')
-    subject.add_argument('private_data', nargs=1,  type=str, help='private data (e.g. json)')
+    subject.add_argument('subject_id', nargs=1,  type=int, help='id for subject')
+    subjectdata = subparser.add_parser('create_subject_data', help='Create a new data subject record')
+    subjectdata.add_argument('--target', action="append", choices=party_names, help='Part(ies) to share a subject record', required=True)
+    subjectdata.add_argument('subject_id', nargs=1,  type=int, help='id for subject')
+    subjectdata.add_argument('key_id', nargs=1,  type=int, help='id for key')
+    subjectdata.add_argument('public_data1', nargs=1,  type=str, help='public_data1')
+    subjectdata.add_argument('public_data2', nargs=1,  type=str, help='public_data2')
+    subjectdata.add_argument('private_data', nargs=1,  type=str, help='private data (e.g. json)')
     dump_contracts = subparser.add_parser('dump', help='Dump contracts visible to a party')
     dump_contracts.add_argument('--offset', nargs=1,  type=str, help='ledger offset', required=False)
+    test = subparser.add_parser('test', help='test command')
     args = parser.parse_args()
 
     logging.basicConfig(filename=args.party + ".log", level=logging.DEBUG)
@@ -709,7 +750,7 @@ def main(argv):
         print("ERROR: No party specific")
         exit(1)
 
-    config = Config("http://localhost:6865")
+    config = Config("http://localhost:6865", party_list)
 
     print("ex-canton-gdpr: Encryption on Daml/Canton ledger")
     print("URL: {}".format(args.url))
@@ -718,33 +759,28 @@ def main(argv):
     if args.command == "daemon":
         print("Daemon mode".format(args.party))
         asyncio.run( run_automation(config, run_as_party ) )
-    elif args.command == "group":
-        print("Creating group: {}".format(str(args.group_id[0])))
-        group = GroupConfig( str( args.group_id[0] ) )
-        asyncio.run( run_group(config, run_as_party, group ) )
+    elif args.command == "master":
+        asyncio.run( create_master(config, run_as_party) )
     elif args.command == "invite":
-        print("Invite parties: {} {}".format(args.group_id, args.target))
-        group = GroupConfig(str(args.group_id))
-        for invitee in args.target:
-            target = string_to_party(invitee, party_list)
-            if target == None:
-                print("ERROR: Bad invitee")
-                exit(1)
-            asyncio.run( run_invite(config, run_as_party, group, target ) )
+        asyncio.run( invite_processor(config, run_as_party, args.target ) )
     elif args.command == "create_encryption":
-        print("Create encryption key: {} {}".format(args.group_id[0], args.id[0]))
-        group = GroupConfig(str(args.group_id[0]))
-        asyncio.run( run_dek_key(config, run_as_party, group, args.id[0] ) )
+        print("Create encryption key: {}".format(args.key_id[0]))
+        asyncio.run( register_dek_key(config, run_as_party, args.key_id[0] ) )
     elif args.command == "create_subject":
-        print("Create data subject record: {} {} {} {} {} {}".format(args.group_id[0], args.key_id[0], args.target, args.public_data1, args.public_data2, args.private_data))
+        print("Create data subject record: {}".format(args.subject_id[0]))
+        asyncio.run( create_data_subject(config, run_as_party, args.subject_id[0] ) )
+    elif args.command == "create_subject_data":
+        print("Create data subject record: {} {} {} {} {} {}".format(args.subject_id[0], args.key_id[0], args.target, args.public_data1[0], args.public_data2[0], args.private_data[0]))
         invitees = [string_to_party(x, party_list) for x in args.target]
-        group = GroupConfig(str(args.group_id[0]))
-        asyncio.run( run_data_subject(config, run_as_party,  group, str(args.key_id[0]), invitees, args.public_data1, args.public_data2, args.private_data ) )
+        asyncio.run( create_data_subject_data(config, run_as_party,  str(args.subject_id[0]), str(args.key_id[0]), invitees, args.public_data1[0], args.public_data2[0], args.private_data[0] ) )
     elif args.command == "dump":
         if args.offset != []:
            offset = args.offset[0]
         print("Dumping all contracts in ledger from offset: {}".format(offset))
-        asyncio.run( run_dump_contracts(config, run_as_party, offset))
+        asyncio.run( dump_contracts_offset(config, run_as_party, offset))
+    elif args.command == "test":
+        print("test:")
+        asyncio.run( run_test(config, run_as_party))
 
     exit(0)
 

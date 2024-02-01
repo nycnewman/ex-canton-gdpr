@@ -1,114 +1,238 @@
 module Test where
 
 import Daml.Script
---import DA.List
+-- import DA.Optional
 import Setup
 import IdentityManagement
---import DA.Optional
+import DataSubject
+import DA.Optional
 
-testSharedGroup = script do
+testIdentityManagement = script do
   testParties@TestParties{..} <- setupParties
+
+  masterCid <- submit owner do
+    createCmd DataControllerMaster with
+      dataController = owner
 
   let 
     ownerKey = PublicKey with
       publicKey = "OWNER KEY"
       fingerprint = "OWNER FINGERPRINT"
 
-  groupId <- submit owner do
-    createCmd IdentityGroup with
-      owner
-      members = []
-      id = "123"
-
-  groupId <- submit owner do
-    exerciseCmd @IdentityGroup groupId InviteNewMember with
-      invitee = identity1
-
-  groupId <- submit owner do
-    exerciseCmd @IdentityGroup groupId InviteNewMember with
-      invitee = identity2
-
-  groupId <- submit owner do
-    exerciseCmd @IdentityGroup groupId InviteNewMember with
-      invitee = identity3
-
-  group456Id <- submit owner do
-    createCmd IdentityGroup with
-      owner
-      members = []
-      id = "456"
-
-  group456Id <- submit owner do
-    exerciseCmd @IdentityGroup group456Id InviteNewMember with
-      invitee = identity4
-
   let 
     identity1Key = PublicKey with
       publicKey = "IDENTITY1 KEY"
       fingerprint = "IDENTITY1 FINGERPRINT"
-
-  key1Id <- submit identity1 do
-    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
-      member = identity1
-      publicKey = identity1Key
 
   let 
     identity2Key = PublicKey with
       publicKey = "IDENTITY2 KEY"
       fingerprint = "IDENTITY2 FINGERPRINT"
 
-  key2Id <- submit identity2 do
-    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
-      member = identity2
-      publicKey = identity1Key
-
   let 
-    identity1Key = PublicKey with
+    identity3Key = PublicKey with
       publicKey = "IDENTITY3 KEY"
       fingerprint = "IDENTITY3 FINGERPRINT"
 
-  key3Id <- submit identity3 do
-    exerciseCmd @IdentityGroup groupId RegisterPublicKey with
-      member = identity3
-      publicKey = identity1Key
+  let 
+    identity4Key = PublicKey with
+      publicKey = "IDENTITY4 KEY"
+      fingerprint = "IDENTITY4 FINGERPRINT"
 
-  -- result <- submit identity1 do
-  --   exerciseCmd @IdentityGroup groupId FetchMemberKey with
-  --     member = owner
-  --     actor = identity1
-  -- debug $ result
+  let 
+    identity5Key = PublicKey with
+      publicKey = "IDENTITY5 KEY"
+      fingerprint = "IDENTITY5 FINGERPRINT"
 
-  return (groupId, testParties)
+  -- Propose to each subprocessor
+  proposalCid1 <- submit owner do
+    exerciseCmd @DataControllerMaster masterCid InviteDataProcessor with
+      dataProcessor = identity1
+      controllerPublicKey = ownerKey
+
+  proposalCid2 <- submit owner do
+    exerciseCmd @DataControllerMaster masterCid InviteDataProcessor with
+      dataProcessor = identity2
+      controllerPublicKey = ownerKey
+
+  proposalCid3 <- submit owner do
+    exerciseCmd @DataControllerMaster masterCid InviteDataProcessor with
+      dataProcessor = identity3
+      controllerPublicKey = ownerKey
+
+  proposalCid4 <- submit owner do
+    exerciseCmd @DataControllerMaster masterCid InviteDataProcessor with
+      dataProcessor = identity4
+      controllerPublicKey = ownerKey
+
+  proposalCid5 <- submit owner do
+    exerciseCmd @DataControllerMaster masterCid InviteDataProcessor with
+      dataProcessor = identity5
+      controllerPublicKey = ownerKey
+
+  -- Agree to all proposals
+  validationCid1 <- submit identity1 do
+    exerciseCmd @DataProcessorProposal proposalCid1 AcceptAndRegister with
+      processorPublicKey = identity1Key
+
+  validationCid2 <- submit identity2 do
+    exerciseCmd @DataProcessorProposal proposalCid2 AcceptAndRegister with
+      processorPublicKey = identity2Key
+
+  validationCid3 <- submit identity3 do
+    exerciseCmd @DataProcessorProposal proposalCid3 AcceptAndRegister with
+      processorPublicKey = identity3Key
+
+  validationCid4 <- submit identity4 do
+    exerciseCmd @DataProcessorProposal proposalCid4 AcceptAndRegister with
+      processorPublicKey = identity4Key
+
+  validationCid5 <- submit identity5 do
+    exerciseCmd @DataProcessorProposal proposalCid5 AcceptAndRegister with
+      processorPublicKey = identity5Key
+
+  agreement1Cid <- submit owner do
+    exerciseCmd @DataProcessorValidation validationCid1 Validate
+
+  agreement2Cid <- submit owner do
+    exerciseCmd @DataProcessorValidation validationCid2 Validate
+
+  agreement3Cid <- submit owner do
+    exerciseCmd @DataProcessorValidation validationCid3 Validate
+
+  agreement4Cid <- submit owner do
+    exerciseCmd @DataProcessorValidation validationCid4 Validate
+
+  agreement5Cid <- submit owner do
+    exerciseCmd @DataProcessorValidation validationCid5 Validate
+
+  -- Test revocation of agreement by processor
+  submit owner do
+    exerciseCmd @DataProcessorAgreement agreement4Cid RevokeByController
+
+  -- Test revocation of agreement by processor
+  submit identity5 do
+    exerciseCmd @DataProcessorAgreement agreement5Cid RevokeByProcessor
+
+  return (testParties)
 
 testEncryption = script do
 
-  (groupId, testParties@TestParties{..}) <- testSharedGroup
-  groupId <- submit owner do
-    createCmd EncryptionKey with
-      owner = owner
-      groupId = "123"
-      id = "11111"
-      wrappedKey = "wrapper DEK"
+  (testParties@TestParties{..}) <- testIdentityManagement
 
+  let
+    keyId = KeyId "29387401982734097812094371029387420"
+
+  ownerKeyCid <- submit owner do
+    createCmd WrappedKey with
+      owner = owner
+      recipient = owner
+      wrappedKey = "wrapper DEK"
+      keyId = keyId
+      agreementContractCid = None
+
+  agreements <- query @DataProcessorAgreement owner
+
+  let processors = map (\(cid, contract) -> (Some cid, contract.dataProcessor) ) agreements 
+
+  debug $ show agreements
+  debug $ show processors
+
+  -- done by automation
+  ccs <- mapA
+    (\ (cid, party) 
+       -> submit 
+            owner 
+            do 
+              createCmd 
+                WrappedKey 
+                  {owner = owner, recipient = party, wrappedKey = ("wrapped for " <> show party), 
+                    keyId = keyId, agreementContractCid = cid }) 
+    processors
+
+  -- Create a DataSubject
+  let
+    subjectId1 = SubjectId "812398761983276"
+  
+  dataSubjectCid1 <- submit owner do
+    createCmd DataSubject with
+      subjectId = subjectId1
+      dataController = owner
+      dataProcessors = map snd processors
+
+  -- Associate data with DataSubject
   let 
     encryption : Encryption = EncAES256 with
-        groupId = "123"
-        keyId = "11111"
         iv = "long IV"
+        keyId = keyId
     dataValue = "encrypted-PII"
     privateData : PrivateData = OnLedger with
       encryption
       dataValue
 
-  groupId <- submit owner do
-    createCmd DataSubject with
-      id = "812398761983276"
-      owner = owner
+  submit owner do
+    createCmd DataSubjectData with
+      subjectId = subjectId1
+      dataController = owner
+      dataProcessors = map snd processors
       publicData1 = "open text 1"
       publicData2 = "open text 2"
       privateData = Some privateData
-      subprocessors = [owner]
 
-  return ()
+  let 
+    encryption : Encryption = EncAES256 with
+        iv = "long IV"
+        keyId = keyId
+    dataLocation = "https://some-server.com/some-path/uuid-of-file"
+    privateData : PrivateData = OffLedger with
+      encryption
+      dataLocation
+
+  submit owner do
+    createCmd DataSubjectData with
+      subjectId = subjectId1
+      dataController = owner
+      dataProcessors = map snd processors
+      publicData1 = "open text 1"
+      publicData2 = "open text 2"
+      privateData = Some privateData
+
+  submit owner do
+    createCmd DataSubjectData with
+      subjectId = subjectId1
+      dataController = owner
+      dataProcessors = map snd processors
+      publicData1 = "open text 1"
+      publicData2 = "open text 2"
+      privateData = None
+
+  -- data subject erasure request
+  erasureReq <- submit owner do
+    exerciseCmd @DataSubject dataSubjectCid1 RequestDataSubjectErasure with
+      subjectId = subjectId1
+
+  optionalReq <- submit identity1 do
+    exerciseCmd @DataSubjectErasureRequest erasureReq Acknowledge with
+      processor = identity1
+  debug $ show optionalReq
+
+  optionalReq <- submit identity2 do
+    exerciseCmd @DataSubjectErasureRequest (fromSome optionalReq) Acknowledge with
+      processor = identity2
+  debug $ show optionalReq
+
+  optionalReq <- submit identity3 do
+    exerciseCmd @DataSubjectErasureRequest (fromSome optionalReq) Acknowledge with
+      processor = identity3
+
+  -- controller rotates their public key
+
+  -- processor rotates their public key
+
+  -- encryption key is compromised and requires redistribution and re-encryption of data
+
+
+  return (testParties)
+
 
 

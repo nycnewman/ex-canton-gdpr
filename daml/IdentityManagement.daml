@@ -1,41 +1,12 @@
 module IdentityManagement where
 
---import DA.Optional
---import DA.Exception
-import DA.List
-
-template EncryptionKey 
-  with
-    id : Text
-    owner : Party
-    groupId: Text
-    wrappedKey: Text
-
-  where
-    signatory owner
-  
-    key (owner, groupId, id) : (Party, Text, Text)
-    maintainer key._1
-
-template SharedKey 
-  with
-    id : Text
-    groupId: Text
-    owner : Party
-    recipient : Party
-    wrappedKey: Text
-
-  where
-    signatory owner
-    observer recipient
-  
-    key (owner, recipient, groupId, id) : (Party, Party, Text, Text)
-    maintainer key._1
+data KeyId = KeyId Text 
+  deriving (Eq, Show)
 
 data Encryption
   = EncNone
     -- ^ No encryption, the file is in plain text.
-  | EncAES256 with groupId: Text, keyId: Text, iv: Text
+  | EncAES256 with keyId: KeyId, iv: Text
     -- ^ 256-bit AES encryption, CBC mode, PKCS5 padding
   deriving (Eq, Show)
 
@@ -48,91 +19,86 @@ isEncNone : Encryption -> Bool
 isEncNone EncNone = True
 isEncNone _ = False
 
-template DataSubject with
-    id: Text
-    owner: Party
-    subprocessors: [Party]
-    publicData1: Text
-    publicData2: Text
-    privateData: Optional PrivateData
-  where
-    signatory owner
-    observer subprocessors
-
 data PublicKey = PublicKey with
     publicKey : Text
     fingerprint : Text
       deriving (Eq,Show)
 
-template IdentityGroup with
-    owner : Party
-    id: Text
-    members : [Party]
+template DataControllerMaster with
+    dataController : Party
+
   where
-    signatory owner
-    observer members
+    signatory dataController
 
-    key (owner, id) : (Party, Text)
-    maintainer key._1
+    nonconsuming choice InviteDataProcessor : ContractId DataProcessorProposal 
+      with
+        dataProcessor : Party
+        controllerPublicKey : PublicKey
 
-    choice InviteNewMember : ContractId IdentityGroup with
-      invitee : Party
+          controller dataController
 
-        controller owner
+          do
+            create DataProcessorProposal with 
+              dataController
+              dataProcessor
+              controllerPublicKey
 
-        do
-          create this with 
-            members = dedup (invitee :: members)
+template DataProcessorProposal with
+    dataController : Party
+    controllerPublicKey : PublicKey
+    dataProcessor : Party
 
-    choice RevokeMember : ContractId IdentityGroup with
-      member : Party
-
-        controller owner
- 
-        do
-          -- assert (owner /= member)
-          create this with
-            members = filter (/=member) members
-
-    nonconsuming choice RegisterPublicKey : ContractId RegisteredIdentity with
-      member: Party
-      publicKey: PublicKey
-
-        controller member
-        
-        do
-          -- need check that they haven't registered a key previously
-          assert (member `elem` (owner :: members) )
-          assertMsg "PublicKey is invalid" (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
-
-          create RegisteredIdentity with 
-            groupId = id
-            owner
-            identity = member
-            publicKey
-
-    nonconsuming choice FetchMemberKey : (ContractId RegisteredIdentity, RegisteredIdentity) with
-      member: Party
-      actor: Party
-
-        controller actor
-      
-        do
-          assert (actor `elem` (owner :: members) )
-          fetchByKey @RegisteredIdentity (owner, member, id)
-          
-template RegisteredIdentity with
-    owner : Party
-    groupId : Text
-    identity : Party
-    publicKey : PublicKey
   where
-    signatory owner
-    observer identity
+    signatory dataController
+    observer dataProcessor
 
-    key (owner, identity, groupId) : (Party, Party, Text)
-    maintainer key._1
+    choice AcceptAndRegister : (ContractId DataProcessorValidation) with
+        processorPublicKey : PublicKey
+      controller dataProcessor
 
-    ensure (publicKey.publicKey /= "" && publicKey.fingerprint /= "")
+      do
+        create DataProcessorValidation with
+          dataController
+          controllerPublicKey
+          dataProcessor
+          processorPublicKey
 
+template DataProcessorValidation with
+    dataController : Party
+    controllerPublicKey : PublicKey
+    dataProcessor : Party
+    processorPublicKey : PublicKey
+
+  where
+    signatory dataController, dataProcessor
+
+    choice Validate : (ContractId DataProcessorAgreement) with
+      controller dataController
+
+      do
+        create DataProcessorAgreement with
+          dataController
+          controllerPublicKey
+          dataProcessor
+          processorPublicKey
+
+template DataProcessorAgreement with
+    dataController : Party
+    dataProcessor : Party
+    controllerPublicKey : PublicKey
+    processorPublicKey : PublicKey
+  where
+    signatory dataController, dataProcessor
+
+    choice RevokeByController : () with
+      controller dataController
+
+      do
+        return ()
+
+    choice RevokeByProcessor : () with
+      controller dataProcessor
+
+      do
+        return ()
 

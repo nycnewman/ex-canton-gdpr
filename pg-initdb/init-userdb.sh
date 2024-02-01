@@ -17,6 +17,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     CREATE DATABASE participant2;
     GRANT ALL PRIVILEGES ON DATABASE participant2 TO participant2;
 
+    CREATE USER participant3 ENCRYPTED PASSWORD 'Participant3Password!';
+    CREATE DATABASE participant3;
+    GRANT ALL PRIVILEGES ON DATABASE participant3 TO participant3;
+
     REVOKE ALL ON SCHEMA public FROM public;
 EOSQL
 
