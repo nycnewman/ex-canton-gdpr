@@ -10,13 +10,17 @@ import sys
 import base64
 import traceback
 import pprint
+import json
 
 import dazl
 from dazl.ledgerutil import ACS
+from dazl.ledger import ActAs, Admin, ReadAs, User
 
 from dataclasses import dataclass, fields
 from dataclasses_json import dataclass_json
 from typing import List
+
+from google.cloud import storage
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
@@ -220,10 +224,10 @@ def encrypt_data_payload(encryption_key: str, original_data: str):
     except Exception as e:
         log_message(traceback.format_exc(), e)
 
-def unencrypt_data_payload(plaintext_key, private_data):
+def unencrypt_data_payload(plaintext_key, private_data: str, iv: str):
     try: 
-        dataValue = base64.b64decode(private_data['OnLedger']['dataValue'])
-        iv = base64.b64decode(private_data['OnLedger']['encryption']['EncAES256']['iv'])
+        dataValue = base64.b64decode(private_data)
+        iv = base64.b64decode(iv)
         cipher = Cipher(algorithms.AES(plaintext_key), modes.CBC(iv))
         decryptor = cipher.decryptor()
         original_text = decryptor.update(dataValue) + decryptor.finalize()
@@ -412,7 +416,7 @@ async def create_data_subject(config: Config, owner: PartyConfig, subject_id: st
         log_message(traceback.format_exc(), e)
 
 @log_cancellation
-async def create_data_subject_data(config: Config, owner: PartyConfig, subject_id: str, key_id: str, subprocessors: [PartyConfig], public_data1: str, public_data2: str, private_data: str ):
+async def create_data_subject_data(config: Config, owner: PartyConfig, subject_id: str, key_id: str, location: str, subprocessors: [PartyConfig], public_data1: str, public_data2: str, private_data: str ):
     try:
         encryption_keys = {}
         async with dazl.connect(url=config.url, act_as=dazl.Party(owner.party), read_as=dazl.Party(owner.party)) as conn:
@@ -438,17 +442,32 @@ async def create_data_subject_data(config: Config, owner: PartyConfig, subject_i
 
         (iv, encrypted_data) = encrypt_data_payload(plaintext_key, private_data)
 
-        private_data = {
-            "OnLedger" : {
-                'encryption' : {
+        encryption_setting = { 
                     'EncAES256': {
                         'keyId' : {'KeyId': key_id},
                         'iv' : iv
-                    }
-                },
-                'dataValue' : encrypted_data
-            }
-        }
+                    } }
+        
+        private_data = {}
+        print(location)
+        if location == 'on':
+            private_data['OnLedger'] = {}
+            private_data['OnLedger']['encryption'] = encryption_setting
+            private_data['OnLedger']['dataValue'] = encrypted_data
+        elif location == 'off':
+            private_data['OffLedger'] = {}
+            private_data['OffLedger']['encryption'] = encryption_setting
+
+            file_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k = 63))
+            bucket_name = "kms-test-gcs"       # TODO: Hardcoded but should be a configuration parameter
+            destination_blob_name = "061a2a61b4f25e04d1c5e02d706444ed2d908fe550bbf7d76bbbbd2e896c3f59/{}".format(file_id)
+
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(destination_blob_name)
+            blob.upload_from_string(encrypted_data)
+
+            private_data['OffLedger']['dataLocation'] = ''.join( (bucket_name, ":", destination_blob_name) )
 
         subprocessors_ids = [x.party for x in subprocessors]
 
@@ -513,40 +532,59 @@ async def dump_data_subjects(config: Config, party: PartyConfig):
                     for data_contract in data_subject_data[subject_id]:
                         privateData = None
 
+                        enc_key_id = None
+                        enc_iv = None
+                        data_value = None
                         if data_contract['privateData'].get('OnLedger', None) != None:
                             enc_key_id = str(data_contract['privateData']['OnLedger']['encryption']['EncAES256']['keyId']['KeyId'])
+                            enc_iv = data_contract['privateData']['OnLedger']['encryption']['EncAES256']['iv']
 
-                            if encryption_keys.get(enc_key_id, None) == None:
-                                print("DDS: No key available to decrypt contract (1) ({})".format(party.party))
-                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['id'], 
-                                    data_subject_data[data_contract]['publicData1'], data_contract['publicData2'], "<ERROR> Decrypting data"))
-                                continue
-
-                            for agreement in encryption_keys[enc_key_id]:
-                                if data_contract['dataController'] == party.party:
-                                    # party is data controller so has no agreement
-                                    key_contract = encryption_keys[enc_key_id]['primary']
-                                    wrapped_key = key_contract.payload['wrappedKey']
-                                else:
-                                    # party is a subprocessor so need to match to agreement
-                                    key_contract = encryption_keys[enc_key_id][agreement]
-                                    wrapped_key = key_contract.payload['wrappedKey']
+                            data_value = data_contract['privateData']['OnLedger']['dataValue']
                             
-                            plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
+                        elif data_contract['privateData'].get('OffLedger', None) != None:
+                            enc_key_id = str(data_contract['privateData']['OffLedger']['encryption']['EncAES256']['keyId']['KeyId'])
+                            enc_iv = data_contract['privateData']['OffLedger']['encryption']['EncAES256']['iv']
 
-                            if plaintext_key == None:
-                                print("DDS: Decryption of key not possible (2) ({})".format(party.party))
-                                privateData = None
-                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
-                                    data_contract['publicData1'], data_contract['publicData2'], privateData))
-                                continue
-                            else:
-                                privateData = unencrypt_data_payload(plaintext_key, data_contract['privateData'])
-                                print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
-                                    data_contract['publicData1'], data_contract['publicData2'], privateData))
+                            data_location = data_contract['privateData']['OffLedger']['dataLocation']
+                            (bucket_name, destination_blob_name) = data_location.split(':')
+                            storage_client = storage.Client()
+                            bucket = storage_client.bucket(bucket_name)
+                            blob = bucket.blob(destination_blob_name)
+                            data_value = blob.download_as_string()
+
                         else:
                             print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], data_contract['publicData1'], 
                                 data_contract['publicData2'], '<None>'))
+
+                        if encryption_keys.get(enc_key_id, None) == None:
+                            print("DDS: No key available to decrypt contract (1) ({})".format(party.party))
+                            print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
+                                data_subject_data[data_contract]['publicData1'], data_contract['publicData2'], "<ERROR> Decrypting data"))
+                            continue
+
+                        for agreement in encryption_keys[enc_key_id]:
+                            if data_contract['dataController'] == party.party:
+                                # party is data controller so has no agreement
+                                key_contract = encryption_keys[enc_key_id]['primary']
+                                wrapped_key = key_contract.payload['wrappedKey']
+                            else:
+                                # party is a subprocessor so need to match to agreement
+                                key_contract = encryption_keys[enc_key_id][agreement]
+                                wrapped_key = key_contract.payload['wrappedKey']
+                        
+                        plaintext_key = unwrap_dek_key(party.rsa_key.private_key, wrapped_key)
+
+                        if plaintext_key == None:
+                            print("DDS: Decryption of key not possible (2) ({})".format(party.party))
+                            privateData = None
+                            print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
+                                data_contract['publicData1'], data_contract['publicData2'], privateData))
+                            continue
+                        else:
+                            privateData = unencrypt_data_payload(plaintext_key, data_value, enc_iv)
+
+                            print("Data Subject Data: {} | {} | {} | {} | {}".format(party.party, data_contract['subjectId']['SubjectId'], 
+                                data_contract['publicData1'], data_contract['publicData2'], privateData))
 
                 await conn.close()
             await asyncio.sleep(5)
@@ -573,7 +611,7 @@ async def create_master(config : Config, identity: PartyConfig):
                 async for event in stream.creates():
                     logging.debug(event.contract_id)
                     logging.debug(event.payload)
-                    if (event.payload["owner"] == owner.party):
+                    if (event.payload["dataController"] == identity.party):
                         found = True
                         master_contract = event
                     
@@ -686,9 +724,16 @@ async def test_party(config: Config):
         for party in parties:
             print("{} {} {}".format( party.party, party.display_name, party.is_local ))
 
+        party_info = await conn.allocate_party()
+        print(party.party)
+        await conn.create_user(
+            User("testuser2", party_info.party),
+            [ActAs(party_info.party), ReadAs(party_info.party), Admin],
+        )
+
 def main(argv):
 
-    #config = Config("http://localhost:6865")
+    #config = Config("http://localhost:6865", [])
     #asyncio.run( test_party(config ) )
     #exit(1)
 
@@ -733,6 +778,7 @@ def main(argv):
     subject.add_argument('subject_id', nargs=1,  type=int, help='id for subject')
     subjectdata = subparser.add_parser('create_subject_data', help='Create a new data subject record')
     subjectdata.add_argument('--target', action="append", choices=party_names, help='Part(ies) to share a subject record', required=True)
+    subjectdata.add_argument('--location', choices=["on", "off"], help='On or off ledger storage', required=True)
     subjectdata.add_argument('subject_id', nargs=1,  type=int, help='id for subject')
     subjectdata.add_argument('key_id', nargs=1,  type=int, help='id for key')
     subjectdata.add_argument('public_data1', nargs=1,  type=str, help='public_data1')
@@ -770,9 +816,9 @@ def main(argv):
         print("Create data subject record: {}".format(args.subject_id[0]))
         asyncio.run( create_data_subject(config, run_as_party, args.subject_id[0] ) )
     elif args.command == "create_subject_data":
-        print("Create data subject record: {} {} {} {} {} {}".format(args.subject_id[0], args.key_id[0], args.target, args.public_data1[0], args.public_data2[0], args.private_data[0]))
+        print("Create data subject record: {} {} {} {} {} {} {}".format(args.subject_id[0], args.key_id[0], args.location, args.target, args.public_data1[0], args.public_data2[0], args.private_data[0]))
         invitees = [string_to_party(x, party_list) for x in args.target]
-        asyncio.run( create_data_subject_data(config, run_as_party,  str(args.subject_id[0]), str(args.key_id[0]), invitees, args.public_data1[0], args.public_data2[0], args.private_data[0] ) )
+        asyncio.run( create_data_subject_data(config, run_as_party,  str(args.subject_id[0]), str(args.key_id[0]), args.location, invitees, args.public_data1[0], args.public_data2[0], args.private_data[0] ) )
     elif args.command == "dump":
         if args.offset != []:
            offset = args.offset[0]

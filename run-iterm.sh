@@ -6,6 +6,9 @@
 
 rm app.log
 
+
+GOOGLE_APPLICATION_CREDENTIALS=./kmscluster-891e60dd353d.json
+
 daml deploy
 daml script --dar .daml/dist/ex-canton-gdpr-0.0.1.dar --ledger-host localhost --ledger-port 6865 --script-name Setup:setupParties --output-file parties.json
 
@@ -34,11 +37,11 @@ do
     KEY_ID=$(od -An -N4 -i /dev/urandom | tr -d '-')
     poetry run python3 bots/bots.py -p owner create_encryption $KEY_ID
 
-    poetry run python3 bots/bots.py -p owner create_subject_data --target identity1 --target identity2 $SUBJECT_ID1 $KEY_ID "public 1" "public 1" '{"SSN" : "1111111111","DOB" : "01 Jan 2024","Medical ID" : "987654321"}'
+    poetry run python3 bots/bots.py -p owner create_subject_data --location on --target identity1 --target identity2 $SUBJECT_ID1 $KEY_ID "public 1" "public 1" '{"SSN" : "1111111111","DOB" : "01 Jan 2024","Medical ID" : "987654321"}'
 
-    poetry run python3 bots/bots.py -p owner create_subject_data --target identity1 --target identity2 $SUBJECT_ID1 $KEY_ID "public 2" "public 2" '{"Credit_Card" : "1111-2222-3333-4444", "Expiry": "01-2000", "CVV": "111" }'
+    poetry run python3 bots/bots.py -p owner create_subject_data --location on --target identity1 --target identity2 $SUBJECT_ID1 $KEY_ID "public 2" "public 2" '{"Credit_Card" : "1111-2222-3333-4444", "Expiry": "01-2000", "CVV": "111" }'
 
-    poetry run python3 bots/bots.py -p owner create_subject_data --target identity3 --target identity4 $SUBJECT_ID2 $KEY_ID "public 3" "public 3" '{"SSN":"33333333","DOB":"31 Dec 2024","Medical ID" : "987654321"}'
+    poetry run python3 bots/bots.py -p owner create_subject_data --location off --target identity3 --target identity4 $SUBJECT_ID2 $KEY_ID "public 3" "public 3" '{"SSN":"33333333","DOB":"31 Dec 2024","Medical ID" : "987654321"}'
 
     sleep 10
 

@@ -33,37 +33,6 @@ setupParties = script do
   identity5 <- getOrCreateUserParty "DataProcessor_5"
   return $ TestParties with ..
 
-setupPartiesX: Script TestParties
-setupPartiesX = script do
-  owner <- allocatePartyWithHint "Data_Owner" (PartyIdHint "Data_Owner")
-  identity1 <- allocatePartyWithHint "DataProcessor_1" (PartyIdHint "Data Processor_1")
-  identity2 <- allocatePartyWithHint "DataProcessor_2" (PartyIdHint "Data Processor_2")
-  identity3 <- allocatePartyWithHint "DataProcessor_3" (PartyIdHint "Data Processor_3")
-  identity4 <- allocatePartyWithHint "DataProcessor_4" (PartyIdHint "Data Processor_4")
-  identity5 <- allocatePartyWithHint "DataProcessor_5" (PartyIdHint "Data Processor_5")
-
-  ownerId <- validateUserId "Data_Owner"
-  identity1Id <- validateUserId "DataProcessor_1"
-  identity2Id <- validateUserId "DataProcessor_2"
-  identity3Id <- validateUserId "DataProcessor_3"
-  identity4Id <- validateUserId "DataProcessor_4"
-  identity5Id <- validateUserId "DataProcessor_5"
-
-  createUser (User ownerId (Some owner)) [CanActAs owner]
-  createUser (User identity1Id (Some identity1)) [CanActAs identity1]
-  createUser (User identity2Id (Some identity2)) [CanActAs identity2]
-  createUser (User identity3Id (Some identity3)) [CanActAs identity3]
-  createUser (User identity4Id (Some identity4)) [CanActAs identity4]
-  createUser (User identity5Id (Some identity5)) [CanActAs identity5]
-
-  return $ TestParties with
-    owner = owner
-    identity1 = identity1
-    identity2 = identity2
-    identity3 = identity3
-    identity4 = identity4
-    identity5 = identity5
-
 setup: Script ()
 setup = script do 
   testParties@TestParties{..} <- setupParties
